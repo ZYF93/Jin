@@ -8,13 +8,18 @@
     "dev": "vp dev",
     "build": "tsc && vp build && electron-builder",
     "lint": "vp lint . --report-unused-disable-directives --max-warnings 0",
-    "preview": "vp preview"
+    "preview": "vp preview",
+    "test": "vp test",
+    "typecheck": "tsc --noEmit",
+    "jin:init": "vpx ./scripts/jin-init.ts"
   },
   "dependencies": {
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
+    "@types/node": "^24.19.2",
     "@types/react": "^18.2.64",
     "@types/react-dom": "^18.2.21",
     "@vitejs/plugin-react": "^4.2.1",

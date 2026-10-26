@@ -1,0 +1,25 @@
+# Jin project configuration. Committed to Git.
+version: 1
+project:
+  name: Jin
+  languages:
+    - typescript
+    - react
+scan:
+  roots:
+    - src
+    - electron
+    - shared
+  ignore:
+    - node_modules
+    - dist
+    - dist-electron
+    - .git
+    - .jin/cache
+    - coverage
+approval:
+  mode: single
+  required: 1
+ui:
+  theme: dark
+  glass: subtle
