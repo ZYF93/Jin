@@ -1,0 +1,38 @@
+{
+  "name": "jin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "tsc && vp build && electron-builder",
+    "lint": "vp lint . --report-unused-disable-directives --max-warnings 0",
+    "preview": "vp preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.64",
+    "@types/react-dom": "^18.2.21",
+    "@vitejs/plugin-react": "^4.2.1",
+    "electron": "44.9.3",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.28.2",
+    "globals": "^17.13.0",
+    "typescript": "^5.2.2",
+    "vite": "catalog:",
+    "vite-plugin-electron": "^0.28.6",
+    "vite-plugin-electron-renderer": "^0.14.5",
+    "vite-plus": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.15.0",
+      "onFail": "download"
+    }
+  }
+}
