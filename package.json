@@ -1,12 +1,16 @@
 {
   "name": "jin",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "Architecture-first desktop coding agent",
+  "author": "Jin contributors",
+  "license": "UNLICENSED",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vp dev",
-    "build": "tsc && vp build && electron-builder",
+    "build": "tsc && vp build && pnpm build:merge && electron-builder",
+    "build:merge": "esbuild scripts/merge-wal.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist-electron/merge-wal.cjs",
     "lint": "vp lint . --report-unused-disable-directives --max-warnings 0",
     "preview": "vp preview",
     "test": "vp test",
@@ -14,11 +18,22 @@
     "jin:init": "vpx ./scripts/jin-init.ts"
   },
   "dependencies": {
+    "@xyflow/react": "^12.12.0",
+    "clsx": "^2.1.1",
+    "dagre": "^0.8.5",
+    "diff": "^9.0.0",
+    "lucide-react": "^1.61.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "yaml": "^2.9.1"
+    "shiki": "^4.5.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7",
+    "zustand": "^5.0.16"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/dagre": "^0.7.54",
+    "@types/diff": "^8.0.0",
     "@types/node": "^24.19.2",
     "@types/react": "^18.2.64",
     "@types/react-dom": "^18.2.21",
@@ -27,6 +42,7 @@
     "electron-builder": "^24.13.3",
     "esbuild": "^0.28.2",
     "globals": "^17.13.0",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.2.2",
     "vite": "catalog:",
     "vite-plugin-electron": "^0.28.6",

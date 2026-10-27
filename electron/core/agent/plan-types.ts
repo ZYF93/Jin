@@ -1,0 +1,118 @@
+import type {
+  ArchEdgeDraft,
+  ArchNode,
+  ArchOp,
+  ArchNodeDraft,
+  L0Kind,
+  L1Kind,
+  NodeIntent,
+  NodeStatus,
+} from "../../../shared/arch/types";
+
+export type NodePatch = Partial<
+  Pick<
+    ArchNode,
+    | "level"
+    | "kind"
+    | "parentId"
+    | "name"
+    | "path"
+    | "file"
+    | "symbol"
+    | "responsibility"
+    | "intentId"
+    | "status"
+    | "metadata"
+  >
+>;
+
+export interface PlannedNodeAdd {
+  op: "node.add";
+  node: {
+    id?: string;
+    level: ArchNodeDraft["level"];
+    kind: ArchNodeDraft["kind"];
+    parentId: string | null;
+    name: string;
+    path: string;
+    file: string;
+    symbol: string;
+    responsibility: string;
+    intentId?: string | null;
+    status?: NodeStatus;
+    metadata?: Record<string, unknown>;
+  };
+}
+
+export interface PlannedNodeUpdate {
+  op: "node.update";
+  id: string;
+  patch: NodePatch;
+}
+
+export interface PlannedNodeRemove {
+  op: "node.remove";
+  id: string;
+}
+
+export interface PlannedEdgeAdd {
+  op: "edge.add";
+  edge: ArchEdgeDraft;
+}
+
+export interface PlannedEdgeRemove {
+  op: "edge.remove";
+  id: string;
+}
+
+export type PlannedOp =
+  | PlannedNodeAdd
+  | PlannedNodeUpdate
+  | PlannedNodeRemove
+  | PlannedEdgeAdd
+  | PlannedEdgeRemove;
+
+export interface PlannedTask {
+  title: string;
+  acceptance: string[];
+  dependsOn?: string[];
+}
+
+export interface PlannedNodeIntent {
+  nodeId: string;
+  facetId?: string;
+  statement: string;
+  invariants?: string[];
+  acceptance?: string[];
+}
+
+export interface PlanDraft {
+  title: string;
+  goal: string;
+  tasks: PlannedTask[];
+  nodeIntents: PlannedNodeIntent[];
+  ops: PlannedOp[];
+  reuseQuery: string;
+  assistantMessage: string;
+}
+
+export interface NormalizedPlan {
+  ops: ArchOp[];
+  nodeIntents: NodeIntent[];
+  warnings: string[];
+}
+
+export interface PlannerContext {
+  snapshot: import("../../../shared/arch/types").ArchSnapshot;
+  skills: string;
+  reuseSummary: string;
+}
+
+export interface PlannerConfig {
+  model: import("../../../shared/ipc").ProviderSettings;
+  apiKey: string | null;
+  temperature: number;
+  maxTokens: number;
+}
+
+export type { L0Kind, L1Kind };

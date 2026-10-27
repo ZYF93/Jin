@@ -1,15 +1,22 @@
 // @see - https://www.electron.build/configuration/configuration
 {
   $schema: "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
-  appId: "YourAppID",
+  appId: "dev.jin.architecture",
   asar: true,
-  productName: "YourAppName",
+  productName: "Jin",
+  copyright: "Copyright © 2026 Jin contributors",
   directories: {
     output: "release/${version}",
+    buildResources: "build",
   },
-  files: ["dist", "dist-electron"],
+  files: ["dist/**/*", "dist-electron/**/*", "package.json"],
+  // The Git merge driver is executed by Electron in Node mode. Keeping it
+  // outside the asar archive makes it addressable by plain Node-compatible
+  // runtimes and by teammates' Git clients.
+  asarUnpack: ["dist-electron/merge-wal.cjs"],
   mac: {
     target: ["dmg"],
+    category: "public.app-category.developer-tools",
     artifactName: "${productName}-Mac-${version}-Installer.${ext}",
   },
   win: {
@@ -29,6 +36,7 @@
   },
   linux: {
     target: ["AppImage"],
+    category: "Development",
     artifactName: "${productName}-Linux-${version}.${ext}",
   },
 }

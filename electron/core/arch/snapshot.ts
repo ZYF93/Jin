@@ -95,19 +95,19 @@ function sortByHlcThenId(
 }
 
 /**
- * Hash of everything the reviewer actually approved: the intent, structural
- * ops, and touches. It intentionally does not include the global base/target
- * snapshot, which would invalidate disjoint concurrent approvals after a merge.
+ * Hash the reviewed change set itself. This is the approval binding: it does
+ * not include the global base/target snapshot, so two disjoint concurrent
+ * approvals can merge without invalidating each other.
+ *
+ * Payload order is significant for an unsealed proposal. When records are
+ * written, the session creates them in this order, so the HLC-sorted fold
+ * reproduces the same sequence.
  */
-export function diffHashForVersion(
+export function diffHashForChanges(
   intent: Intent,
-  ops: readonly WalRecord[],
-  touches: readonly WalRecord[],
+  ops: readonly ArchOp[],
+  touches: readonly Touch[] = [],
 ): string {
-  const orderedOps = [...ops].sort(sortByHlcThenId).map((record) => record.payload);
-  const orderedTouches = [...touches]
-    .sort(sortByHlcThenId)
-    .map((record) => record.payload);
   const nodeIntents = [...intent.nodeIntents].sort((a, b) => {
     const left = `${a.nodeId}:${a.facetId ?? ""}:${a.statement}`;
     const right = `${b.nodeId}:${b.facetId ?? ""}:${b.statement}`;
@@ -120,9 +120,24 @@ export function diffHashForVersion(
       tasks: intent.tasks,
       nodeIntents,
     },
-    ops: orderedOps,
-    touches: orderedTouches,
+    ops,
+    touches,
   });
+}
+
+/** Hash the approved change set from sealed WAL records. */
+export function diffHashForVersion(
+  intent: Intent,
+  ops: readonly WalRecord[],
+  touches: readonly WalRecord[],
+): string {
+  const orderedOps = [...ops]
+    .sort(sortByHlcThenId)
+    .map((record) => record.payload as ArchOp);
+  const orderedTouches = [...touches]
+    .sort(sortByHlcThenId)
+    .map((record) => record.payload as Touch);
+  return diffHashForChanges(intent, orderedOps, orderedTouches);
 }
 
 function conflict(
