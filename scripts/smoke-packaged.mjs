@@ -8,8 +8,9 @@
  *   JIN_SMOKE_APP=/path/to/jin node scripts/smoke-packaged.mjs
  */
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 const TIMEOUT_MS = 90_000;
 const MAX_OUTPUT = 200_000;
@@ -70,7 +71,9 @@ function findExecutable() {
 
 function main() {
   const executable = findExecutable();
+  const smokeUserData = mkdtempSync(join(tmpdir(), "jin-packaged-smoke-"));
   const args = [];
+  args.push(`--user-data-dir=${smokeUserData}`);
   if (process.platform === "linux") {
     // CI containers and headless runners often lack a configured SUID sandbox.
     args.push("--no-sandbox", "--disable-gpu");
@@ -97,35 +100,42 @@ function main() {
   child.stderr.on("data", capture);
 
   let settled = false;
-  const finish = (code, detail) => {
+  const finish = (success, code, detail) => {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
-    if (code === 0) {
+    if (success) {
       console.log(`[smoke] PASS: ${detail}`);
-      process.exit(0);
+    } else {
+      console.error(`[smoke] FAIL (exit ${code}): ${detail}`);
+      if (output.trim()) console.error(output.trim());
     }
-    console.error(`[smoke] FAIL (exit ${code}): ${detail}`);
-    if (output.trim()) console.error(output.trim());
-    process.exit(1);
+    const cleanup = () => rmSync(smokeUserData, { recursive: true, force: true });
+    const exitAfterCleanup = () => {
+      cleanup();
+      setTimeout(() => process.exit(success ? 0 : 1), 150);
+    };
+    if (child.exitCode !== null || child.signalCode !== null) exitAfterCleanup();
+    else child.once("close", exitAfterCleanup);
   };
 
   const timer = setTimeout(() => {
     child.kill("SIGKILL");
-    finish("timeout", `packaged app did not finish within ${TIMEOUT_MS}ms`);
+    finish(false, "timeout", `packaged app did not finish within ${TIMEOUT_MS}ms`);
   }, TIMEOUT_MS);
   timer.unref?.();
 
-  child.on("error", (error) => finish("spawn", error.message));
+  child.on("error", (error) => finish(false, "spawn", error.message));
   child.on("close", (code) => {
     const ok = output.includes("JIN_SMOKE_OK");
     if (code === 0 && ok) {
       const line = output
         .split("\n")
         .find((entry) => entry.includes("JIN_SMOKE_OK"));
-      finish(0, line?.trim() ?? "renderer and preload bridge loaded");
+      finish(true, 0, line?.trim() ?? "renderer and preload bridge loaded");
     } else {
       finish(
+        false,
         code ?? "signal",
         ok
           ? "smoke reported OK but the process exited non-zero"

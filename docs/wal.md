@@ -1,5 +1,7 @@
 # Jin WAL v1
 
+[简体中文](wal.zh-CN.md)
+
 > The WAL is Jin's source of truth for architecture history. SQLite is a
 > disposable local materialization of it.
 

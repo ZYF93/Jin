@@ -26,22 +26,29 @@ export function BrandMark({ size = 28 }: { size?: number }) {
         strokeWidth="1.5"
       />
       <path
-        d="M18 18L32 10L46 18V38L32 46L18 38V18Z"
-        stroke="#67E8F9"
+        d="M32 7L54 20V44L32 57L10 44V20L32 7Z"
+        stroke="#6BCFE0"
         strokeWidth="2.4"
+        strokeLinejoin="round"
+        opacity=".68"
       />
       <path
-        d="M24 24L32 19.5L40 24V34L32 38.5L24 34V24Z"
-        stroke="#C4B5FD"
-        strokeWidth="1.9"
+        d="M32 30V16M28 35L17 42M36 35L47 42"
+        stroke="#83E5F4"
+        strokeWidth="2.2"
+        strokeLinecap="round"
       />
       <path
-        d="M32 19.5V38.5M24 24L40 34M40 24L24 34"
-        stroke="#38BDF8"
-        strokeWidth="1.25"
-        opacity=".72"
+        d="M32 24L39 28V36L32 40L25 36V28L32 24Z"
+        fill="#17283D"
+        stroke="#D8F7FB"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
       />
-      <circle cx="32" cy="29" r="3" fill="#FDE68A" />
+      <circle cx="32" cy="32" r="3.1" fill="#FFD878" />
+      <circle cx="32" cy="15" r="2.3" fill="var(--panel-solid)" stroke="#9CEBF4" strokeWidth="1.2" />
+      <circle cx="16" cy="43" r="2.3" fill="var(--panel-solid)" stroke="#9CEBF4" strokeWidth="1.2" />
+      <circle cx="48" cy="43" r="2.3" fill="var(--panel-solid)" stroke="#C1B0FF" strokeWidth="1.2" />
     </svg>
   );
 }

@@ -1,0 +1,161 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.15.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test --run
+
+  build:
+    name: Build and smoke test (${{ matrix.os }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.15.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Set package version from tag
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Expected a semantic version tag such as v1.2.3; got $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          RELEASE_VERSION="$version" node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const packageJson = JSON.parse(readFileSync('package.json', 'utf8'));
+          packageJson.version = process.env.RELEASE_VERSION;
+          writeFileSync('package.json', `${JSON.stringify(packageJson, null, 2)}\n`);
+          NODE
+
+      - name: Install xvfb
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Build app bundles
+        run: pnpm build:app
+
+      - name: Build unpacked app for smoke test
+        run: pnpm exec electron-builder --dir --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a pnpm smoke:packaged
+
+      - name: Smoke test (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: pnpm smoke:packaged
+
+      - name: Build installers
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm exec electron-builder --publish never; then
+              exit 0
+            fi
+            if (( attempt < 3 )); then
+              echo "Installer build failed (attempt $attempt); retrying in $((attempt * 5)) seconds."
+              sleep $((attempt * 5))
+            fi
+          done
+          exit 1
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload installers and update metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: jin-${{ matrix.os }}
+          path: |
+            release/**/Jin-*
+            release/**/latest*.yml
+            release/**/*.blockmap
+            !release/**/*-unpacked/**
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: jin-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release and upload installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          assets=(release-assets/*)
+          if (( ${#assets[@]} == 0 )); then
+            echo "No installer artifacts were downloaded." >&2
+            exit 1
+          fi
+          if ! gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            release_args=()
+            if [[ "$TAG_NAME" == *-* ]]; then
+              release_args+=(--prerelease)
+            fi
+            gh release create "$TAG_NAME" --verify-tag --generate-notes --title "Jin $TAG_NAME" "${release_args[@]}"
+          fi
+          gh release upload "$TAG_NAME" "${assets[@]}" --clobber

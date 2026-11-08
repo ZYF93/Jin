@@ -2,9 +2,6 @@ name: Package smoke
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
   pull_request:
     paths:
       - "package.json"
@@ -13,6 +10,7 @@ on:
       - "electron/**"
       - "scripts/smoke-packaged.mjs"
       - ".github/workflows/package-smoke.yml"
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: read
@@ -31,13 +29,13 @@ jobs:
           - windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: pnpm/action-setup@v4
         with:
           version: 12.15.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -73,7 +71,7 @@ jobs:
 
       - name: Upload unpacked app on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jin-${{ matrix.os }}-failure
           path: release/**/logs/**

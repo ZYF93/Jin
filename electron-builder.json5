@@ -17,11 +17,13 @@
   // electron-updater needs a zip artifact on macOS even when the DMG is the
   // user-facing installer; the zip is the update payload.
   mac: {
+    icon: "build/icon.icns",
     target: ["dmg", "zip"],
     category: "public.app-category.developer-tools",
     artifactName: "${productName}-Mac-${version}-Installer.${ext}",
   },
   win: {
+    icon: "build/icon.ico",
     target: [
       {
         target: "nsis",
@@ -37,17 +39,19 @@
     deleteAppDataOnUninstall: false,
   },
   linux: {
-    target: ["AppImage"],
+    icon: "build/icon.png",
+    target: ["AppImage", "deb"],
     category: "Development",
     artifactName: "${productName}-Linux-${version}.${ext}",
   },
-  // Generic feed consumed by electron-updater. Replace this URL with the
-  // deployment endpoint, override it in Settings, or set
-  // JIN_UPDATE_FEED_URL for a single run.
+  // GitHub Releases host installers and updater metadata. A generic feed can
+  // override this in Settings or through JIN_UPDATE_FEED_URL.
   publish: [
     {
-      provider: "generic",
-      url: "https://updates.jin.dev/releases",
+      provider: "github",
+      owner: "ZYF93",
+      repo: "Jin",
+      releaseType: "release",
     },
   ],
 }
