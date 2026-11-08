@@ -4,12 +4,20 @@ import type {
   L1Kind,
   NodeKind,
 } from "../../../shared/arch/types";
+import { translate, type MessageKey, type TranslationParams } from "../../../shared/i18n";
 import { stableIds } from "../ids/stable";
 import type {
   PlannedNodeAdd,
   PlannedOp,
   PlanDraft,
 } from "./plan-types";
+
+type Translator = (
+  key: MessageKey,
+  params?: TranslationParams,
+) => string;
+
+const english: Translator = (key, params) => translate("en", key, params);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -194,17 +202,23 @@ function addNode(
   return ops;
 }
 
-function planIntentOnly(snapshot: ArchSnapshot, text: string, reason: string): PlanDraft {
+function planIntentOnly(
+  snapshot: ArchSnapshot,
+  text: string,
+  reason: string,
+  t: Translator,
+): PlanDraft {
   const target =
     findNode(snapshot, extractQuoted(text) ?? "") ??
     findNode(snapshot, text.split(/\s+/).slice(0, 4).join(" "));
   return {
-    title: text.slice(0, 80) || "Intent-only turn",
+    kind: "plan",
+    title: text.slice(0, 80) || t("localPlan.intentOnlyTitle"),
     goal: text,
     tasks: [
       {
-        title: "Clarify the requested change and implement it within the approved architecture",
-        acceptance: ["The result matches the goal and does not silently change architecture"],
+        title: t("localPlan.intentOnlyTask"),
+        acceptance: [t("localPlan.intentOnlyAcceptance")],
       },
     ],
     nodeIntents: target
@@ -219,9 +233,7 @@ function planIntentOnly(snapshot: ArchSnapshot, text: string, reason: string): P
       : [],
     ops: [],
     reuseQuery: text,
-    assistantMessage:
-      reason ||
-      "I prepared an intent-only version. No structural change is proposed, so this review is cheap; approve it to continue and I will use the existing architecture.",
+    assistantMessage: reason || t("localPlan.intentOnlyGeneric"),
   };
 }
 
@@ -231,7 +243,11 @@ function planIntentOnly(snapshot: ArchSnapshot, text: string, reason: string): P
  * explicit structural verbs; everything else becomes an intent-only version
  * rather than pretending an LLM wrote a plan.
  */
-export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
+export function localPlan(
+  snapshot: ArchSnapshot,
+  request: string,
+  t: Translator = english,
+): PlanDraft {
   const text = request.trim();
   const lower = text.toLowerCase();
   const quoted = extractQuoted(text);
@@ -240,18 +256,19 @@ export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
     const target = findNode(snapshot, quoted ?? text);
     if (target) {
       return {
-        title: `Remove ${target.name}`,
+        kind: "plan",
+        title: t("localPlan.removeTitle", { name: target.name }),
         goal: text,
         tasks: [
           {
-            title: `Remove ${target.name} and its containment edges`,
-            acceptance: ["No approved node or edge references the removed unit"],
+            title: t("localPlan.removeTask", { name: target.name }),
+            acceptance: [t("localPlan.removeAcceptance")],
           },
         ],
         nodeIntents: [],
         ops: [{ op: "node.remove", id: target.id }],
         reuseQuery: text,
-        assistantMessage: `Prepared a removal proposal for ${target.name}. Review its children and dependents before approving.`,
+        assistantMessage: t("localPlan.removeMessage", { name: target.name }),
       };
     }
   }
@@ -263,13 +280,18 @@ export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
     if (match?.[1] && match[2]) {
       const target = findNode(snapshot, match[1].trim());
       if (target) {
+        const nextName = match[2].trim();
         return {
-          title: `Rename ${target.name}`,
+          kind: "plan",
+          title: t("localPlan.renameTitle", { name: target.name }),
           goal: text,
           tasks: [
             {
-              title: `Rename ${target.name} to ${match[2].trim()}`,
-              acceptance: ["The node keeps its stable id and the responsibility is updated"],
+              title: t("localPlan.renameTask", {
+                name: target.name,
+                to: nextName,
+              }),
+              acceptance: [t("localPlan.renameAcceptance")],
             },
           ],
           nodeIntents: [],
@@ -277,11 +299,14 @@ export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
             {
               op: "node.update",
               id: target.id,
-              patch: { name: match[2].trim() },
+              patch: { name: nextName },
             },
           ],
           reuseQuery: text,
-          assistantMessage: `Prepared a rename of ${target.name} to ${match[2].trim()}.`,
+          assistantMessage: t("localPlan.renameMessage", {
+            name: target.name,
+            to: nextName,
+          }),
         };
       }
     }
@@ -292,12 +317,13 @@ export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
     const statement = text.replace(/^.*?(?:责任|职责|responsibility)\s*(?:改为|to|[:：])?\s*/i, "").trim();
     if (target && statement) {
       return {
-        title: `Update responsibility for ${target.name}`,
+        kind: "plan",
+        title: t("localPlan.responsibilityTitle", { name: target.name }),
         goal: text,
         tasks: [
           {
-            title: `Refine the responsibility of ${target.name}`,
-            acceptance: ["The new responsibility is specific enough to verify"],
+            title: t("localPlan.responsibilityTask", { name: target.name }),
+            acceptance: [t("localPlan.responsibilityAcceptance")],
           },
         ],
         nodeIntents: [
@@ -316,7 +342,9 @@ export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
           },
         ],
         reuseQuery: text,
-        assistantMessage: `Prepared a responsibility update for ${target.name}.`,
+        assistantMessage: t("localPlan.responsibilityMessage", {
+          name: target.name,
+        }),
       };
     }
   }
@@ -329,15 +357,20 @@ export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
     const firstAdd = ops.find(
       (op): op is PlannedNodeAdd => op.op === "node.add",
     );
+    const kind = t(`kind.${detected.kind}` as MessageKey);
     return {
-      title: `${detected.level === "L0" ? "Add module" : "Add L1 unit"} ${name}`,
+      kind: "plan",
+      title: t(
+        detected.level === "L0" ? "localPlan.addModuleTitle" : "localPlan.addUnitTitle",
+        { name },
+      ),
       goal: text,
       tasks: [
         {
-          title: `Add and implement ${name} without duplicating an existing unit`,
+          title: t("localPlan.addTask", { name }),
           acceptance: [
-            "The new unit has one clear responsibility",
-            "The ReusePlan was considered before writing code",
+            t("localPlan.addAcceptanceResponsibility"),
+            t("localPlan.addAcceptanceReuse"),
           ],
         },
       ],
@@ -353,7 +386,10 @@ export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
         : [],
       ops,
       reuseQuery: text,
-      assistantMessage: `Prepared a ${detected.level} ${String(detected.kind)} proposal for ${name}. The diff is shown before any code is written.`,
+      assistantMessage:
+        detected.level === "L0"
+          ? t("localPlan.addModuleMessage", { name })
+          : t("localPlan.addUnitMessage", { name, kind }),
     };
   }
 
@@ -361,8 +397,9 @@ export function localPlan(snapshot: ArchSnapshot, request: string): PlanDraft {
     snapshot,
     text,
     lower.includes("why") || text.includes("为什么")
-      ? "I prepared an intent-only version to capture the question. Answering it does not require an architecture change."
-      : "I could not infer a safe structural operation from this request. I prepared an intent-only version; use a more explicit verb (add, remove, rename, responsibility) or configure an AI provider for a semantic plan.",
+      ? t("localPlan.intentOnlyQuestion")
+      : t("localPlan.intentOnlyUnsafe"),
+    t,
   );
   return fallback;
 }

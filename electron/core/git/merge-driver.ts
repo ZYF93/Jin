@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { translate, type Language, type MessageKey, type TranslationParams } from "../../../shared/i18n";
 
 const ATTRIBUTE_LINE = ".jin/wal.jsonl merge=jin-wal";
 const MODULE_DIR = fileURLToPath(new URL(".", import.meta.url));
@@ -81,11 +82,16 @@ function appendAttribute(root: string): boolean {
  * `JIN_MERGE_DRIVER` can point at a packaged wrapper without changing this
  * module's behavior.
  */
-export function installMergeDriver(root: string): { ok: boolean; message: string } {
+export function installMergeDriver(
+  root: string,
+  language: Language = "en",
+): { ok: boolean; message: string } {
+  const t = (key: MessageKey, params?: TranslationParams): string =>
+    translate(language, key, params);
   if (!hasGit(root)) {
     return {
       ok: false,
-      message: "This project is not a Git repository. Initialize Git before installing the team merge driver.",
+      message: t("merge.notGit"),
     };
   }
   try {
@@ -93,61 +99,49 @@ export function installMergeDriver(root: string): { ok: boolean; message: string
     if (!driver) {
       return {
         ok: false,
-        message:
-          "The Jin WAL merge driver is missing. Reinstall Jin, or run from a checkout containing scripts/merge-wal.ts.",
+        message: t("merge.driverMissing"),
       };
     }
     git(root, ["config", "merge.jin-wal.name", "Jin WAL merge driver"]);
     git(root, ["config", "merge.jin-wal.driver", driver.command]);
     const added = appendAttribute(root);
+    const development = driver.source === "development";
     return {
       ok: true,
-      message: `${added ? "Added .gitattributes entry and configured" : "Configured"} the Jin WAL merge driver${driver.source === "development" ? " (development checkout)" : ""}. Commit .gitattributes so teammates inherit it.`,
+      message: t(
+        added
+          ? development
+            ? "merge.installedDev"
+            : "merge.installed"
+          : development
+            ? "merge.configuredDev"
+            : "merge.configured",
+      ),
     };
   } catch (error) {
     return {
       ok: false,
-      message: `Could not install the merge driver: ${error instanceof Error ? error.message : String(error)}`,
+      message: t("merge.failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }
 
-export function mergeInstructions(root: string): string {
+export function mergeInstructions(root: string, language: Language = "en"): string {
   const driver = resolveDriver(root);
-  const command = driver?.command ?? "ELECTRON_RUN_AS_NODE=1 <jin> <merge-wal.cjs> %O %A %B";
-  return `# Jin team merge
-
-The architecture ledger is the append-only \`.jin/wal.jsonl\` file. Do not hand-edit it.
-
-## Install the merge driver once per clone
-
-In Jin: **Settings → Team → Install Git merge driver**. Or run:
-
-\`\`\`sh
-git config merge.jin-wal.name "Jin WAL merge driver"
-git config merge.jin-wal.driver "${command.replace(/"/g, '\\"')}"
-printf '\\n.jin/wal.jsonl merge=jin-wal\\n' >> .gitattributes
-\`\`\`
-
-Commit the \`.gitattributes\` change. Teammates inherit the attribute, then run the
-same two \`git config\` commands on their clone (Git never commits driver config).
-${driver?.source === "bundled" ? "\nThe bundled driver runs through Jin's own Electron binary; teammates do not need Node.js installed.\n" : ""}
-## Merge behavior
-
-The driver reads the Git base/ours/theirs versions, unions the causally ordered
-records, and writes the merged JSONL back to ours. Semantic write conflicts stay
-in the log as \`conflicted\` versions; open Jin to review and resolve them. Parse
-errors, missing parents, duplicate ids, and cycles block the merge instead of
-producing a corrupt ledger.
-
-## Alternative: manual resolution
-
-If Git reports a conflict:
-
-\`\`\`sh
-${driver?.source === "bundled" ? `ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${driver.path}" %O %A %B` : "vpx scripts/merge-wal.ts %O %A %B"}
-\`\`\`
-
-or open Jin and use **Project → Refresh**. Rejected versions remain in history
-and are never applied.`;
+  const command = (
+    driver?.command ?? "ELECTRON_RUN_AS_NODE=1 <jin> <merge-wal.cjs> %O %A %B"
+  ).replace(/"/g, '\\"');
+  const manualCommand =
+    driver?.source === "bundled"
+      ? `ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${driver.path}" %O %A %B`
+      : "vpx scripts/merge-wal.ts %O %A %B";
+  const driverNote =
+    driver?.source === "bundled" ? translate(language, "merge.bundledNote") : "";
+  return translate(language, "merge.instructions", {
+    command,
+    manualCommand,
+    driverNote,
+  });
 }

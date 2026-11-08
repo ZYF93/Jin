@@ -1,15 +1,12 @@
-import {
-  ChevronLeft,
-  FileCode2,
-  Layers3,
-  Settings,
-  Sparkles,
-} from "lucide-react";
+import { FileCode2, GitBranch, Layers3, Settings, Sparkles } from "lucide-react";
+import { useT } from "../lib/i18n";
 import { useJin } from "../state/useJin";
 import { FilePanel } from "./FilePanel";
+import { GitPanel } from "./GitPanel";
 import { IntentPanel } from "./IntentPanel";
 
 export function LeftPanel() {
+  const t = useT();
   const app = useJin((state) => state.app);
   const collapsed = useJin((state) => state.intentsCollapsed);
   const leftTab = useJin((state) => state.leftTab);
@@ -18,18 +15,29 @@ export function LeftPanel() {
   const openSettings = useJin((state) => state.openSettings);
 
   const proposal = app?.proposal;
-  const versionCount = app?.snapshot ? Object.keys(app.snapshot.versions).length : 0;
 
-  if (collapsed) {
-    return (
+  // Clicking the active activity collapses the content panel; the rail itself
+  // always stays visible.
+  const activate = (tab: "intents" | "files" | "git"): void => {
+    if (leftTab === tab && !collapsed) {
+      setIntentsCollapsed(true);
+      return;
+    }
+    setLeftTab(tab);
+    setIntentsCollapsed(false);
+  };
+
+  const titleFor = (tab: "intents" | "files" | "git", label: string): string =>
+    leftTab === tab && !collapsed ? t("left.collapsePanel") : label;
+
+  return (
+    <div className="flex min-h-0 shrink-0">
       <aside className="rail flex shrink-0 flex-col items-center gap-1 py-2">
         <button
-          className="rail-btn mb-1"
-          onClick={() => {
-            setLeftTab("intents");
-            setIntentsCollapsed(false);
-          }}
-          title="Expand intents"
+          className={`rail-btn mb-1 ${leftTab === "intents" && !collapsed ? "active" : ""}`}
+          onClick={() => activate("intents")}
+          title={titleFor("intents", t("left.intentsTab"))}
+          aria-label={titleFor("intents", t("left.intentsTab"))}
         >
           <Layers3 size={17} />
           {proposal && (proposal.status === "in_review" || proposal.status === "stale") ? (
@@ -37,62 +45,49 @@ export function LeftPanel() {
           ) : null}
         </button>
         <button
-          className={`rail-btn ${leftTab === "files" ? "active" : ""}`}
-          onClick={() => {
-            setLeftTab("files");
-            setIntentsCollapsed(false);
-          }}
-          title="Files"
+          className={`rail-btn ${leftTab === "files" && !collapsed ? "active" : ""}`}
+          onClick={() => activate("files")}
+          title={titleFor("files", t("left.files"))}
+          aria-label={titleFor("files", t("left.files"))}
         >
           <FileCode2 size={16} />
         </button>
-        <div className="my-1 h-px w-6 bg-[var(--border)]" />
         <button
-          className="rail-btn"
-          onClick={() => openSettings("tools")}
-          title="Tools & language servers"
+          className={`rail-btn ${leftTab === "git" && !collapsed ? "active" : ""}`}
+          onClick={() => activate("git")}
+          title={titleFor("git", t("left.git"))}
+          aria-label={titleFor("git", t("left.git"))}
         >
+          <GitBranch size={16} />
+        </button>
+        <div className="my-1 h-px w-6 bg-[var(--border)]" />
+        <button className="rail-btn" onClick={() => openSettings("tools")} title={t("left.tools")}>
           <Sparkles size={15} />
         </button>
         <div className="mt-auto">
-          <button className="rail-btn" onClick={() => openSettings("general")} title="Settings">
+          <button
+            className="rail-btn"
+            onClick={() => openSettings("general")}
+            title={t("left.settings")}
+          >
             <Settings size={16} />
           </button>
         </div>
       </aside>
-    );
-  }
 
-  return (
-    <aside className="glass flex w-[332px] shrink-0 flex-col overflow-hidden border-y-0 border-l-0 2xl:w-[356px]">
-      <div className="flex h-[39px] shrink-0 items-center gap-0 border-b border-[var(--border)] px-1.5">
-        <button
-          className={`tab ${leftTab === "intents" ? "active" : ""}`}
-          onClick={() => setLeftTab("intents")}
-        >
-          <Layers3 size={12} />
-          Intents
-          <span className="font-mono-ui text-[8px] text-[var(--faint)]">{versionCount}</span>
-        </button>
-        <button
-          className={`tab ${leftTab === "files" ? "active" : ""}`}
-          onClick={() => setLeftTab("files")}
-        >
-          <FileCode2 size={12} />
-          Files
-        </button>
-        <button
-          className="icon-btn ml-auto h-7 w-7"
-          onClick={() => setIntentsCollapsed(true)}
-          title="Collapse intent panel"
-          aria-label="Collapse intent panel"
-        >
-          <ChevronLeft size={14} />
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {leftTab === "intents" ? <IntentPanel /> : <FilePanel />}
-      </div>
-    </aside>
+      {!collapsed ? (
+        <aside className="glass flex w-[332px] shrink-0 flex-col overflow-hidden border-y-0 border-l-0 2xl:w-[356px]">
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {leftTab === "intents" ? (
+              <IntentPanel />
+            ) : leftTab === "files" ? (
+              <FilePanel />
+            ) : (
+              <GitPanel />
+            )}
+          </div>
+        </aside>
+      ) : null}
+    </div>
   );
 }

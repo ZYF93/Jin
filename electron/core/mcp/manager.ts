@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { McpServerInfo } from "../../../shared/ipc";
+import type { McpCallResult, McpServerInfo } from "../../../shared/ipc";
 
 interface McpServerConfig {
   command?: string;
@@ -84,13 +84,15 @@ function parseStdioResponse(line: string): JsonRpcResponse | null {
   }
 }
 
-async function stdioTools(
+async function stdioRequest(
   root: string,
   config: McpServerConfig,
+  method: string,
+  params: Record<string, unknown>,
   timeoutMs = 6000,
-): Promise<string[]> {
+): Promise<unknown> {
   if (!config.command) throw new Error("stdio server requires a command");
-  return new Promise<string[]>((resolve, reject) => {
+  return new Promise<unknown>((resolve, reject) => {
     const child = spawn(config.command as string, config.args ?? [], {
       cwd: root,
       env: { ...process.env, ...config.env },
@@ -99,7 +101,7 @@ async function stdioTools(
     let buffer = "";
     let stderr = "";
     let settled = false;
-    const finish = (error: Error | null, tools: string[] = []): void => {
+    const finish = (error: Error | null, result?: unknown): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -109,10 +111,10 @@ async function stdioTools(
         // already gone
       }
       if (error) reject(error);
-      else resolve(tools);
+      else resolve(result);
     };
     const timer = setTimeout(() => {
-      finish(new Error(`MCP initialize timed out after ${timeoutMs}ms${stderr ? `: ${stderr.slice(-300)}` : ""}`));
+      finish(new Error(`MCP ${method} timed out after ${timeoutMs}ms${stderr ? `: ${stderr.slice(-300)}` : ""}`));
     }, timeoutMs);
     const send = (value: unknown): void => {
       try {
@@ -121,7 +123,6 @@ async function stdioTools(
         finish(new Error("MCP process closed stdin"));
       }
     };
-    let initialized = false;
     child.stdout.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
       for (;;) {
@@ -137,19 +138,18 @@ async function stdioTools(
             finish(new Error(response.error.message ?? "MCP initialize failed"));
             return;
           }
-          initialized = true;
           send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
-          send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+          send({ jsonrpc: "2.0", id: 2, method, params });
         } else if (response.id === 2) {
           if (response.error) {
-            finish(new Error(response.error.message ?? "MCP tools/list failed"));
+            finish(new Error(response.error.message ?? `MCP ${method} failed`));
             return;
           }
-          finish(null, toolNames(response.result));
+          finish(null, response.result);
+          return;
         } else if (response.error && response.id === undefined) {
           finish(new Error(response.error.message ?? "MCP server error"));
         }
-        if (initialized && response.id === 2) return;
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
@@ -160,7 +160,7 @@ async function stdioTools(
     child.on("exit", (code) => {
       if (!settled) {
         finish(
-          new Error(`MCP server exited before tools/list${code === null ? "" : ` (code ${code})`}${stderr ? `: ${stderr.slice(-300)}` : ""}`),
+          new Error(`MCP server exited before ${method}${code === null ? "" : ` (code ${code})`}${stderr ? `: ${stderr.slice(-300)}` : ""}`),
         );
       }
     });
@@ -177,6 +177,14 @@ async function stdioTools(
   });
 }
 
+async function stdioTools(
+  root: string,
+  config: McpServerConfig,
+  timeoutMs = 6000,
+): Promise<string[]> {
+  return toolNames(await stdioRequest(root, config, "tools/list", {}, timeoutMs));
+}
+
 function eventStreamData(body: string): string[] {
   return body
     .split("\n")
@@ -185,10 +193,12 @@ function eventStreamData(body: string): string[] {
     .filter(Boolean);
 }
 
-async function remoteTools(
+async function remoteRequest(
   config: McpServerConfig,
+  method: string,
+  params: Record<string, unknown>,
   timeoutMs = 8000,
-): Promise<string[]> {
+): Promise<unknown> {
   if (!config.url) throw new Error("remote MCP server requires a url");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -198,14 +208,14 @@ async function remoteTools(
   };
   const request = async (
     id: number,
-    method: string,
-    params: Record<string, unknown>,
+    requestMethod: string,
+    requestParams: Record<string, unknown>,
     sessionId?: string,
   ): Promise<{ response: Response; json: JsonRpcResponse }> => {
     const response = await fetch(config.url as string, {
       method: "POST",
       headers: sessionId ? { ...headers, "mcp-session-id": sessionId } : headers,
-      body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+      body: JSON.stringify({ jsonrpc: "2.0", id, method: requestMethod, params: requestParams }),
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`MCP HTTP ${response.status}`);
@@ -236,12 +246,19 @@ async function remoteTools(
     });
     if (init.json.error) throw new Error(init.json.error.message ?? "MCP initialize failed");
     const sessionId = init.response.headers.get("mcp-session-id") ?? undefined;
-    const list = await request(2, "tools/list", {}, sessionId);
-    if (list.json.error) throw new Error(list.json.error.message ?? "MCP tools/list failed");
-    return toolNames(list.json.result);
+    const result = await request(2, method, params, sessionId);
+    if (result.json.error) throw new Error(result.json.error.message ?? `MCP ${method} failed`);
+    return result.json.result;
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function remoteTools(
+  config: McpServerConfig,
+  timeoutMs = 8000,
+): Promise<string[]> {
+  return toolNames(await remoteRequest(config, "tools/list", {}, timeoutMs));
 }
 
 /**
@@ -313,5 +330,67 @@ export class McpManager {
     }
     this.cache = results;
     return results;
+  }
+
+  /**
+   * Invoke one MCP tool. Enabling a server never requires approval, but every
+   * call is audited with its server, tool and outcome. Arguments are passed
+   * through unchanged as MCP `arguments`.
+   */
+  async call(
+    serverName: string,
+    toolName: string,
+    args: Record<string, unknown> = {},
+    timeoutMs = 30_000,
+  ): Promise<McpCallResult> {
+    const config = readConfig(this.root).mcpServers?.[serverName];
+    if (!config) throw new Error(`Unknown MCP server: ${serverName}`);
+    if (config.disabled) throw new Error(`MCP server is disabled: ${serverName}`);
+    const started = Date.now();
+    try {
+      const result =
+        transportFor(config) === "stdio"
+          ? await stdioRequest(
+              this.root,
+              config,
+              "tools/call",
+              { name: toolName, arguments: args },
+              timeoutMs,
+            )
+          : await remoteRequest(
+              config,
+              "tools/call",
+              { name: toolName, arguments: args },
+              timeoutMs,
+            );
+      const record =
+        typeof result === "object" && result !== null
+          ? (result as { isError?: unknown; content?: unknown })
+          : null;
+      const callResult: McpCallResult = {
+        server: serverName,
+        tool: toolName,
+        isError: record?.isError === true,
+        content: record?.content ?? result,
+        durationMs: Date.now() - started,
+      };
+      audit(this.root, {
+        server: serverName,
+        action: "tools/call",
+        tool: toolName,
+        isError: callResult.isError,
+        durationMs: callResult.durationMs,
+      });
+      return callResult;
+    } catch (error) {
+      audit(this.root, {
+        server: serverName,
+        action: "tools/call",
+        tool: toolName,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - started,
+      });
+      throw error;
+    }
   }
 }

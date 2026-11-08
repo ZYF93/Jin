@@ -25,6 +25,7 @@ const L1_KINDS = new Set<string>([
   "route",
   "store",
   "type",
+  "module",
   "function",
   "table",
   "schema",
@@ -42,9 +43,8 @@ function nodeKindForLevel(level: string, kind: string): NodeKind | null {
 
 function findSystemId(snapshot: ArchSnapshot): string | null {
   return (
-    Object.values(snapshot.nodes).find(
-      (node) => node.level === "L0" && node.kind === "system",
-    )?.id ?? null
+    Object.values(snapshot.nodes).find((node) => node.level === "L0" && node.kind === "system")
+      ?.id ?? null
   );
 }
 
@@ -223,14 +223,14 @@ export function normalizePlan(
       });
       continue;
     }
-    let parentId =
-      resolveId(draft.raw.parentId) ??
-      (draft.raw.parentId ? fallbackParent : null);
+    let parentId = resolveId(draft.raw.parentId) ?? (draft.raw.parentId ? fallbackParent : null);
     if (draft.level === "L0" && draft.kind !== "system" && !parentId) {
       parentId = fallbackParent;
     }
     if (draft.raw.parentId && !resolveId(draft.raw.parentId)) {
-      warnings.push(`New node "${draft.raw.name}" referenced an unknown parent; attached to the system root`);
+      warnings.push(
+        `New node "${draft.raw.name}" referenced an unknown parent; attached to the system root`,
+      );
     }
     const status: NodeStatus = STATUSES.has(draft.raw.status ?? "")
       ? (draft.raw.status as NodeStatus)
@@ -305,9 +305,7 @@ export function normalizePlan(
   const nodeIntents: NodeIntent[] = [];
   for (const planned of plan.nodeIntents) {
     const nodeId = resolveId(planned.nodeId) ?? planned.nodeId;
-    const facetId = planned.facetId
-      ? resolveId(planned.facetId) ?? planned.facetId
-      : undefined;
+    const facetId = planned.facetId ? (resolveId(planned.facetId) ?? planned.facetId) : undefined;
     const targetId = facetId ?? nodeId;
     if (!snapshot.nodes[targetId] && !addedIds.has(targetId)) {
       warnings.push(`Skipped node intent for unknown target ${targetId}`);

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
@@ -20,7 +20,7 @@ import { hashValue } from "../hash/canonical";
 import { ulid } from "../ids/ulid";
 import { formatHlc } from "../time/hlc";
 import { foldWal } from "./fold";
-import { appendRecord, loadWal, writeWalAtomic } from "./io";
+import { appendRecord, appendRecords, loadWal, writeWalAtomic } from "./io";
 import { mergeWalRecords } from "./merge";
 import { sealRecord } from "./record";
 
@@ -510,6 +510,8 @@ describe("mergeWalRecords", () => {
     expect(
       merged.conflicts.some((conflict) => conflict.code === "stale-write"),
     ).toBe(true);
+    const stale = merged.conflicts.find((conflict) => conflict.code === "stale-write");
+    expect(stale?.versionId).toBe(branchBVersion);
     expect(merged.snapshot.versions[branchBVersion]?.status).toBe("conflicted");
     expect(merged.snapshot.nodes[nodeId]?.name).toBe("NodeA");
   });
@@ -549,6 +551,36 @@ describe("WAL IO", () => {
       const rewritten = loadWal(path);
       expect(rewritten.errors).toEqual([]);
       expect(rewritten.records).toHaveLength(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("appends a batch in one write and rejects invalid batches before writing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jin-wal-batch-"));
+    const path = join(dir, ".jin", "wal.jsonl");
+    const badPath = join(dir, ".jin", "bad.jsonl");
+    try {
+      const versionId = nextId();
+      const nodeId = nextId();
+      const intent = makeIntent(versionId, "Batch IO");
+      const intentRec = intentRecord(intent);
+      const op = opRecord(
+        versionId,
+        { op: "node.add", node: makeNode(nodeId, "BatchNode") },
+        [intentRec.id],
+      );
+
+      appendRecords(path, [intentRec, op]);
+      const loaded = loadWal(path);
+      expect(loaded.errors).toEqual([]);
+      expect(loaded.records).toHaveLength(2);
+
+      const invalid = { ...op, hash: "sha256:not-the-record-hash" };
+      expect(() => appendRecords(badPath, [intentRec, invalid])).toThrow(
+        /invalid WAL record/,
+      );
+      expect(existsSync(badPath)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -28,6 +28,7 @@ import {
   setSetting,
 } from "./app-db";
 import { openJinIndex } from "./jin-index";
+import { INDEX_SCHEMA_VERSION } from "./schema";
 
 const ACTOR: Actor = { id: "user:test", kind: "user", name: "Test" };
 const BASE_TIME = 1_700_000_000_000;
@@ -152,7 +153,7 @@ describe("JinIndex", () => {
         expect(fts[0]?.node_id).toBe(first.nodeId);
 
         const meta = index.meta();
-        expect(meta.schemaVersion).toBe(1);
+        expect(meta.schemaVersion).toBe(INDEX_SCHEMA_VERSION);
         expect(meta.recordCount).toBe(3);
         expect(meta.lastRecordId).toBe(first.decisionId);
         expect(meta.snapshotHash).toBe(hashSnapshot(folded.snapshot));

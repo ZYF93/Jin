@@ -10,11 +10,15 @@ import {
 import { useState } from "react";
 import type { RiskHint } from "../../shared/arch/diff";
 import type { ProposalView } from "../../shared/ipc";
+import { useT } from "../lib/i18n";
 import {
   formatRelative,
   isReviewing,
+  localizeReuseReason,
+  localizeReuseSummary,
   nextOrdinal,
   ordinalLabel,
+  riskText,
 } from "../lib/utils";
 import { useJin } from "../state/useJin";
 import { ArchitectureCanvas } from "./ArchitectureCanvas";
@@ -28,6 +32,7 @@ function RiskIcon({ level }: { level: RiskHint["level"] }) {
 }
 
 function ReviewDetails({ proposal }: { proposal: ProposalView }) {
+  const t = useT();
   const intent = proposal.intent;
   const nodes = intent.nodeIntents;
   const stale = proposal.status === "stale";
@@ -36,16 +41,18 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
     <div className="space-y-4 p-4">
       {stale ? (
         <div className="rounded-lg border border-rose-400/25 bg-rose-400/[0.06] p-2.5 text-[9.5px] leading-relaxed text-[var(--muted)]">
-          <strong className="text-[var(--danger)]">This review is stale.</strong> The
-          approved architecture changed while you were reviewing. Reject it and create a fresh
-          turn; never approve against an old target.
+          <strong className="text-[var(--danger)]">
+            {t("review.staleBannerStrong")}
+          </strong>{" "}
+          {t("review.staleBanner")}
         </div>
       ) : null}
 
       <section>
         <div className="flex items-center gap-2">
           <span className="chip chip-warning">
-            <GitPullRequest size={9} /> {stale ? "stale" : "in review"}
+            <GitPullRequest size={9} />{" "}
+            {stale ? t("review.stale") : t("review.inReview")}
           </span>
           <span className="font-mono-ui text-[9px] text-[var(--faint)]">
             {ordinalLabel(nextOrdinal(proposal.baseSnapshot))}
@@ -67,24 +74,30 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
           <div className="font-mono-ui text-[15px] font-bold text-[var(--success)]">
             +{proposal.diff.summary.added}
           </div>
-          <div className="text-[8px] tracking-wide text-[var(--faint)] uppercase">added</div>
+          <div className="text-[8px] tracking-wide text-[var(--faint)] uppercase">
+            {t("review.added")}
+          </div>
         </div>
         <div className="inner-panel px-2 py-1.5 text-center">
           <div className="font-mono-ui text-[15px] font-bold text-[var(--danger)]">
             −{proposal.diff.summary.removed}
           </div>
-          <div className="text-[8px] tracking-wide text-[var(--faint)] uppercase">removed</div>
+          <div className="text-[8px] tracking-wide text-[var(--faint)] uppercase">
+            {t("review.removed")}
+          </div>
         </div>
         <div className="inner-panel px-2 py-1.5 text-center">
           <div className="font-mono-ui text-[15px] font-bold text-[var(--warning)]">
             ~{proposal.diff.summary.modified}
           </div>
-          <div className="text-[8px] tracking-wide text-[var(--faint)] uppercase">modified</div>
+          <div className="text-[8px] tracking-wide text-[var(--faint)] uppercase">
+            {t("review.modified")}
+          </div>
         </div>
       </div>
 
       <section>
-        <div className="panel-title mb-2">Tasks</div>
+        <div className="panel-title mb-2">{t("review.tasks")}</div>
         <div className="space-y-1.5">
           {intent.tasks.map((task) => (
             <div key={task.id} className="inner-panel flex items-start gap-2 p-2">
@@ -114,12 +127,12 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
 
       <section>
         <div className="panel-title mb-2">
-          Node intents <span className="text-[var(--faint)]">({nodes.length})</span>
+          {t("review.nodeIntents")}{" "}
+          <span className="text-[var(--faint)]">({nodes.length})</span>
         </div>
         {nodes.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--border)] px-3 py-2.5 text-[9px] leading-relaxed text-[var(--faint)]">
-            This turn is structural only. The diff changes the approved graph, and no extra
-            node-level intent is attached.
+            {t("review.structuralOnly")}
           </div>
         ) : (
           <div className="space-y-1.5">
@@ -160,28 +173,33 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
 
       <section>
         <div className="mb-2 flex items-center gap-2">
-          <span className="panel-title">Risks</span>
+          <span className="panel-title">{t("review.risks")}</span>
           <span className="chip h-[18px] px-1.5 text-[8px]">{proposal.risks.length}</span>
         </div>
         {proposal.risks.length === 0 ? (
           <div className="flex items-center gap-1.5 text-[9px] text-[var(--success)]">
-            <CheckCircle2 size={11} /> No architecture risks detected.
+            <CheckCircle2 size={11} /> {t("review.noRisks")}
           </div>
         ) : (
           <div className="space-y-1.5">
-            {proposal.risks.map((risk) => (
-              <div key={risk.id} className="inner-panel p-2">
-                <div className="flex items-start gap-1.5">
-                  <RiskIcon level={risk.level} />
-                  <div className="min-w-0">
-                    <div className="text-[10px] font-semibold leading-snug">{risk.title}</div>
-                    <div className="mt-0.5 text-[9px] leading-relaxed text-[var(--faint)]">
-                      {risk.detail}
+            {proposal.risks.map((risk) => {
+              const copy = riskText(risk, proposal.diff, t);
+              return (
+                <div key={risk.id} className="inner-panel p-2">
+                  <div className="flex items-start gap-1.5">
+                    <RiskIcon level={risk.level} />
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-semibold leading-snug">
+                        {copy.title}
+                      </div>
+                      <div className="mt-0.5 text-[9px] leading-relaxed text-[var(--faint)]">
+                        {copy.detail}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
@@ -189,11 +207,12 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
       {proposal.reusePlan ? (
         <section>
           <div className="panel-title mb-2">
-            ReusePlan · {proposal.reusePlan.candidates.length} candidate
-            {proposal.reusePlan.candidates.length === 1 ? "" : "s"}
+            {t("review.reusePlan", {
+              count: proposal.reusePlan.candidates.length,
+            })}
           </div>
           <p className="text-[9px] leading-relaxed text-[var(--faint)]">
-            {proposal.reusePlan.summary}
+            {localizeReuseSummary(proposal.reusePlan.summary, t)}
           </p>
           <div className="mt-2 space-y-1">
             {proposal.reusePlan.candidates.slice(0, 6).map((candidate) => (
@@ -207,7 +226,7 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
                     {candidate.path}
                   </div>
                   <div className="mt-0.5 text-[8.5px] leading-relaxed text-[var(--faint)]">
-                    {candidate.reason}
+                    {localizeReuseReason(candidate.reason, t)}
                   </div>
                 </div>
               </div>
@@ -217,17 +236,14 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
       ) : null}
 
       <div className="rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-2 text-[8.5px] leading-relaxed text-[var(--faint)]">
-        Approval binds the Intent, architecture ops, and touches by{" "}
-        <span className="font-mono-ui text-[var(--muted)]">
-          {proposal.diffHash.slice(0, 12)}…
-        </span>
-        . No code diff is part of this decision.
+        {t("review.binds", { hash: proposal.diffHash.slice(0, 12) })}
       </div>
     </div>
   );
 }
 
 export function ReviewDialog() {
+  const t = useT();
   const open = useJin((state) => state.reviewOpen);
   const proposal = useJin((state) => state.app?.proposal ?? null);
   const busy = useJin((state) => state.busy);
@@ -247,18 +263,20 @@ export function ReviewDialog() {
       open={open && Boolean(proposal)}
       onClose={close}
       className="review-modal"
-      label="Architecture review"
+      label={t("review.title")}
     >
       {proposal ? (
         <>
           <ModalHeader
-            title="Architecture review"
-            subtitle="Intent, graph diff, and risks. Never a code diff."
+            title={t("review.title")}
+            subtitle={t("review.subtitle")}
             onClose={close}
             icon={<Layers3 size={16} />}
           >
             <span className="chip chip-accent">
-              {ordinalLabel(nextOrdinal(proposal.baseSnapshot))} pending approval
+              {t("review.pending", {
+                ordinal: ordinalLabel(nextOrdinal(proposal.baseSnapshot)),
+              })}
             </span>
           </ModalHeader>
 
@@ -273,13 +291,15 @@ export function ReviewDialog() {
 
           <div className="flex shrink-0 items-center gap-2 border-t border-[var(--border)] bg-[var(--panel-soft)] px-4 py-3">
             <div className="hidden text-[8.5px] leading-relaxed text-[var(--faint)] lg:block">
-              One approval applies the WAL bundle and starts implementation.
+              {proposal.architectureOnly
+                ? t("review.architectureOnly")
+                : t("review.startsImplementation")}
               <br />
-              Rejected versions remain in history and are never applied.
+              {t("review.rejectedHistory")}
             </div>
             <input
               className="field ml-auto h-8 w-[210px] text-[10px]"
-              placeholder="Optional review note…"
+              placeholder={t("review.notePlaceholder")}
               value={note}
               onChange={(event) => setNote(event.target.value)}
               disabled={Boolean(busy)}
@@ -290,7 +310,7 @@ export function ReviewDialog() {
               onClick={() => void rejectProposal(note.trim() || undefined)}
             >
               <X size={12} />
-              Reject
+              {t("common.reject")}
             </button>
             <button
               className="btn btn-primary h-8 px-4"
@@ -298,16 +318,20 @@ export function ReviewDialog() {
               onClick={() => void approveProposal(note.trim() || undefined)}
               title={
                 stale
-                  ? "Reject this stale review, then rescan"
-                  : "Approve the Intent and architecture diff"
+                  ? t("review.staleApproveHint")
+                  : proposal.architectureOnly
+                    ? t("review.approveArchitectureHint")
+                    : t("review.approveHint")
               }
             >
-              {busy === "Applying approval…" ? (
+              {busy === t("busy.approving") ? (
                 <Spinner size={12} />
               ) : (
                 <ShieldCheck size={13} />
               )}
-              Approve & implement
+              {proposal.architectureOnly
+                ? t("review.approveArchitecture")
+                : t("review.approveImplement")}
             </button>
           </div>
         </>

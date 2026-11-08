@@ -179,7 +179,7 @@ export function foldWal(records: readonly WalRecord[]): FoldResult {
   for (const [versionId, records] of decisions) {
     for (const record of records) {
       const result = applyDecision(snapshot, record.payload, record.id);
-      if (result) conflicts.push(result);
+      if (result) conflicts.push({ ...result, versionId });
       const version = snapshot.versions[versionId];
       if (version) version.updatedAt = record.payload.createdAt;
     }
@@ -187,7 +187,7 @@ export function foldWal(records: readonly WalRecord[]): FoldResult {
   for (const [versionId, records] of implementations) {
     for (const record of records) {
       const result = applyImplementation(snapshot, record.payload, record.id);
-      if (result) conflicts.push(result);
+      if (result) conflicts.push({ ...result, versionId });
       const version = snapshot.versions[versionId];
       if (version) version.updatedAt = record.payload.createdAt;
     }
@@ -242,6 +242,7 @@ export function foldWal(records: readonly WalRecord[]): FoldResult {
       conflicts.push({
         code: "approval-mismatch",
         message: `Version ${versionId}: approval does not match the reviewed change set`,
+        versionId,
         recordIds: [
           ...(decisions.get(versionId) ?? []).map((record) => record.id),
           ...versionOps.map((record) => record.id),
@@ -279,7 +280,7 @@ export function foldWal(records: readonly WalRecord[]): FoldResult {
 
     if (versionConflicts.length > 0) {
       version.status = "conflicted";
-      conflicts.push(...versionConflicts);
+      conflicts.push(...versionConflicts.map((item) => ({ ...item, versionId })));
       continue;
     }
 

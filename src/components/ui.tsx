@@ -1,6 +1,7 @@
 import { useEffect, type ReactNode } from "react";
 import clsx from "clsx";
 import { Loader2, X } from "lucide-react";
+import { useT } from "../lib/i18n";
 import { useJin } from "../state/useJin";
 
 export function BrandMark({ size = 28 }: { size?: number }) {
@@ -117,6 +118,7 @@ export function ModalHeader({
   icon?: ReactNode;
   children?: ReactNode;
 }) {
+  const t = useT();
   return (
     <div className="flex items-start gap-3 border-b border-[var(--border)] px-5 py-4">
       {icon ? (
@@ -131,7 +133,7 @@ export function ModalHeader({
         ) : null}
       </div>
       {children}
-      <button className="icon-btn" onClick={onClose} aria-label="Close dialog">
+      <button className="icon-btn" onClick={onClose} aria-label={t("common.closeDialog")}>
         <X size={15} />
       </button>
     </div>
@@ -149,6 +151,7 @@ export function SectionLabel({
 }
 
 export function ToastStack() {
+  const t = useT();
   const toasts = useJin((state) => state.toasts);
   const dismiss = useJin((state) => state.dismissToast);
   return (
@@ -168,7 +171,7 @@ export function ToastStack() {
           <button
             className="icon-btn -mt-1 -mr-1 h-6 w-6 shrink-0"
             onClick={() => dismiss(toast.id)}
-            aria-label="Dismiss notification"
+            aria-label={t("common.dismissNotification")}
           >
             <X size={12} />
           </button>

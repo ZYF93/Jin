@@ -9,29 +9,37 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
+import type { MessageKey } from "../../shared/i18n";
+import { isProviderConfigured } from "../../shared/provider";
+import { useT } from "../lib/i18n";
 import { useJin } from "../state/useJin";
 import { BrandMark, Spinner } from "./ui";
 import { formatRelative } from "../lib/utils";
 
-const STEPS = [
+const STEPS: Array<{
+  icon: typeof MessageSquare;
+  title: MessageKey;
+  detail: MessageKey;
+}> = [
   {
     icon: MessageSquare,
-    title: "Describe the turn",
-    detail: "Intent first. What should exist, change, or disappear?",
+    title: "welcome.step1.title",
+    detail: "welcome.step1.detail",
   },
   {
     icon: Layers3,
-    title: "Review architecture",
-    detail: "L0 modules, L1 units, and facets get one colored graph diff.",
+    title: "welcome.step2.title",
+    detail: "welcome.step2.detail",
   },
   {
     icon: ShieldCheck,
-    title: "Approve once",
-    detail: "The implementation is bound to the approved architecture.",
+    title: "welcome.step3.title",
+    detail: "welcome.step3.detail",
   },
 ];
 
 export function WelcomeScreen() {
+  const t = useT();
   const app = useJin((state) => state.app);
   const busy = useJin((state) => state.busy);
   const openProject = useJin((state) => state.openProject);
@@ -40,9 +48,9 @@ export function WelcomeScreen() {
 
   const recents = app?.recentProjects ?? [];
   const provider = app?.settings.provider;
-  const configured =
-    provider?.kind === "ollama" ||
-    (provider?.kind === "openai-compatible" && provider.hasApiKey);
+  const configured = isProviderConfigured(provider);
+  const heroLine = t("welcome.heroLine2", { accent: "\u0001" });
+  const [heroBefore, heroAfter = ""] = heroLine.split("\u0001");
 
   return (
     <div className="flex h-full flex-col overflow-auto">
@@ -51,19 +59,19 @@ export function WelcomeScreen() {
         <div>
           <div className="text-[15px] font-extrabold tracking-tight">Jin</div>
           <div className="font-mono-ui text-[9px] tracking-[0.12em] text-[var(--faint)] uppercase">
-            architecture-first coding
+            {t("welcome.tagline")}
           </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <span className="chip">
-            <span className="status-dot live" /> local-first
+            <span className="status-dot live" /> {t("welcome.localFirst")}
           </span>
           <button
             className="btn btn-ghost"
             onClick={() => openSettings(configured ? "general" : "provider")}
           >
             <Settings size={13} />
-            Settings
+            {t("welcome.settings")}
           </button>
         </div>
       </header>
@@ -72,17 +80,17 @@ export function WelcomeScreen() {
         <section className="min-w-0">
           <div className="chip chip-accent">
             <Sparkles size={11} />
-            Intent · L0/L1 · approval · code · conformance
+            {t("welcome.badge")}
           </div>
           <h1 className="mt-5 max-w-[650px] text-[clamp(34px,4.8vw,62px)] leading-[0.98] font-extrabold tracking-[-0.045em]">
-            Architecture is
+            {t("welcome.heroLine1")}
             <br />
-            the <span className="text-[var(--accent)]">source of truth</span>.
+            {heroBefore}
+            <span className="text-[var(--accent)]">{t("welcome.heroAccent")}</span>
+            {heroAfter}
           </h1>
           <p className="mt-5 max-w-[570px] text-[14px] leading-relaxed text-[var(--muted)]">
-            Jin is a desktop coding agent for teams that review the shape of a change
-            before they review the code. One Intent, one architecture graph diff, one
-            approval, then a verified implementation.
+            {t("welcome.heroDetail")}
           </p>
 
           <div className="mt-8 grid max-w-[720px] gap-3 sm:grid-cols-3">
@@ -96,9 +104,9 @@ export function WelcomeScreen() {
                     0{index + 1}
                   </span>
                 </div>
-                <div className="mt-2.5 text-[11.5px] font-bold">{step.title}</div>
+                <div className="mt-2.5 text-[11.5px] font-bold">{t(step.title)}</div>
                 <div className="mt-1 text-[10.5px] leading-relaxed text-[var(--muted)]">
-                  {step.detail}
+                  {t(step.detail)}
                 </div>
               </div>
             ))}
@@ -106,13 +114,13 @@ export function WelcomeScreen() {
 
           <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-2 text-[10px] text-[var(--faint)]">
             <span className="flex items-center gap-1.5">
-              <GitBranch size={11} /> Async, Git-friendly
+              <GitBranch size={11} /> {t("welcome.asyncGit")}
             </span>
             <span className="flex items-center gap-1.5">
-              <ShieldCheck size={11} /> Approved-only WAL
+              <ShieldCheck size={11} /> {t("welcome.approvedOnly")}
             </span>
             <span className="flex items-center gap-1.5">
-              <Layers3 size={11} /> TS / React first, multi-language
+              <Layers3 size={11} /> {t("welcome.tsFirst")}
             </span>
           </div>
         </section>
@@ -120,9 +128,9 @@ export function WelcomeScreen() {
         <section className="glass-strong slide-up rounded-2xl p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <h2 className="text-[14px] font-bold">Open a workspace</h2>
+              <h2 className="text-[14px] font-bold">{t("welcome.openWorkspace")}</h2>
               <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--muted)]">
-                Choose a Git repository or start a new Jin project in an empty folder.
+                {t("welcome.openWorkspaceDetail")}
               </p>
             </div>
             <span className="chip">.jin/</span>
@@ -135,7 +143,7 @@ export function WelcomeScreen() {
               onClick={() => void openProject()}
             >
               {busy ? <Spinner size={13} /> : <FolderOpen size={14} />}
-              Open project
+              {t("welcome.openProject")}
             </button>
             <button
               className="btn h-10"
@@ -143,9 +151,23 @@ export function WelcomeScreen() {
               onClick={() => void createProject()}
             >
               <FolderPlus size={14} />
-              New project
+              {t("welcome.newProject")}
             </button>
           </div>
+
+          <button
+            className="mt-2 w-full rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] px-3 py-2.5 text-left transition-colors hover:bg-[var(--control)]"
+            onClick={() => useJin.getState().setDemoGraph(true)}
+          >
+            <span className="flex items-center gap-2 text-[11px] font-semibold text-[var(--accent)]">
+              <Sparkles size={13} />
+              {t("welcome.viewDemo")}
+              <ArrowRight size={12} className="ml-auto shrink-0 text-[var(--faint)]" />
+            </span>
+            <span className="mt-1 block text-[9.5px] leading-relaxed text-[var(--faint)]">
+              {t("welcome.viewDemoDetail")}
+            </span>
+          </button>
 
           {!configured ? (
             <button
@@ -154,15 +176,19 @@ export function WelcomeScreen() {
             >
               <Sparkles size={13} className="shrink-0 text-[var(--warning)]" />
               <span className="min-w-0 flex-1 text-[10.5px] leading-relaxed text-[var(--muted)]">
-                <strong className="text-[var(--warning)]">No AI provider yet.</strong>{" "}
-                Scan and local planning work now; configure a provider for implementation.
+                <strong className="text-[var(--warning)]">
+                  {t("welcome.noProviderTitle")}
+                </strong>{" "}
+                {t("welcome.noProviderDetail")}
               </span>
               <ArrowRight size={12} className="shrink-0 text-[var(--faint)]" />
             </button>
           ) : (
             <div className="mt-2 flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] px-3 py-2 text-[10px] text-[var(--muted)]">
               <span className="status-dot success" />
-              {provider?.model ?? "Provider"} ready
+              {t("welcome.providerReady", {
+                model: provider?.model ?? t("welcome.provider"),
+              })}
               <span className="ml-auto font-mono-ui text-[9px] text-[var(--faint)]">
                 {provider?.kind}
               </span>
@@ -170,7 +196,7 @@ export function WelcomeScreen() {
           )}
 
           <div className="mt-5 flex items-center gap-2">
-            <span className="panel-title">Recent</span>
+            <span className="panel-title">{t("welcome.recent")}</span>
             <span className="chip h-[18px] px-1.5 text-[8px]">{recents.length}</span>
             <div className="h-px flex-1 bg-[var(--border)]" />
           </div>
@@ -180,10 +206,10 @@ export function WelcomeScreen() {
               <div className="rounded-xl border border-dashed border-[var(--border)] px-4 py-7 text-center">
                 <Layers3 size={19} className="mx-auto text-[var(--faint)]" />
                 <div className="mt-2 text-[11px] font-semibold text-[var(--muted)]">
-                  No recent projects
+                  {t("welcome.noRecent")}
                 </div>
                 <div className="mt-1 text-[10px] text-[var(--faint)]">
-                  Open a repository to create its first architecture ledger.
+                  {t("welcome.noRecentDetail")}
                 </div>
               </div>
             ) : (
@@ -215,8 +241,8 @@ export function WelcomeScreen() {
       </main>
 
       <footer className="flex items-center justify-between border-t border-[var(--border)] px-7 py-3 text-[9px] text-[var(--faint)]">
-        <span>Jin · local-first architecture ledger</span>
-        <span className="font-mono-ui">no telemetry · no cloud dependency</span>
+        <span>{t("welcome.footer")}</span>
+        <span className="font-mono-ui">{t("welcome.footerTelemetry")}</span>
       </footer>
     </div>
   );

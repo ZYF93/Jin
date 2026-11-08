@@ -14,8 +14,10 @@
   // outside the asar archive makes it addressable by plain Node-compatible
   // runtimes and by teammates' Git clients.
   asarUnpack: ["dist-electron/merge-wal.cjs"],
+  // electron-updater needs a zip artifact on macOS even when the DMG is the
+  // user-facing installer; the zip is the update payload.
   mac: {
-    target: ["dmg"],
+    target: ["dmg", "zip"],
     category: "public.app-category.developer-tools",
     artifactName: "${productName}-Mac-${version}-Installer.${ext}",
   },
@@ -39,4 +41,13 @@
     category: "Development",
     artifactName: "${productName}-Linux-${version}.${ext}",
   },
+  // Generic feed consumed by electron-updater. Replace this URL with the
+  // deployment endpoint, override it in Settings, or set
+  // JIN_UPDATE_FEED_URL for a single run.
+  publish: [
+    {
+      provider: "generic",
+      url: "https://updates.jin.dev/releases",
+    },
+  ],
 }

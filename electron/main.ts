@@ -14,16 +14,30 @@ import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MenuAction } from "../shared/ipc";
+import { translate, type MessageKey, type TranslationParams } from "../shared/i18n";
 import {
   IPC_CHANNELS,
   type AppSettings,
   type AppState,
   type FileContent,
   type FileNode,
+  type GitActionResult,
+  type GitBranchList,
+  type GitCommit,
+  type GitCommitDetail,
+  type GitStatus,
   type JinEvent,
+  type LspInstallResult,
+  type MarketplaceSearchResult,
+  type McpCallResult,
+  type ProviderModelCatalog,
+  type ProviderModelRequest,
   type RecentProject,
+  type ReuseCandidate,
   type SettingsPatch,
   type ToolsInfo,
+  type UpdateState,
+  type VersionReplay,
 } from "../shared/ipc";
 import {
   closeAppDatabase,
@@ -35,7 +49,27 @@ import {
 import { initProject } from "./core/project/init";
 import { locateProject } from "./core/project/config";
 import { ProjectSession } from "./core/session";
+import {
+  LicenseGatedServerError,
+  LspMarketplace,
+  NoStandaloneServerError,
+} from "./core/lsp/marketplace";
 import { SettingsStore } from "./core/settings/app-settings";
+import { UpdateService } from "./core/update/update-service";
+import { fetchModelCatalog, ModelCatalogError } from "./core/agent/model-catalog";
+import {
+  gitBranches,
+  gitCheckout,
+  gitCommit,
+  gitFetch,
+  gitLog,
+  gitPull,
+  gitPush,
+  gitShow,
+  gitStage,
+  gitStatus,
+  gitUnstage,
+} from "./core/git/service";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -74,7 +108,14 @@ const BUILTIN_TOOLS = [
 let mainWindow: BrowserWindow | null = null;
 let appDatabase: AppDatabase | null = null;
 let settingsStore: SettingsStore | null = null;
+let lspMarketplace: LspMarketplace | null = null;
+let updateService: UpdateService | null = null;
 let activeSession: ProjectSession | null = null;
+
+function t(key: MessageKey, params?: TranslationParams): string {
+  const language = settingsStore?.get().language ?? "en";
+  return translate(language, key, params);
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -96,17 +137,28 @@ function recentProjects(): RecentProject[] {
 function emptySettings(): AppSettings {
   if (settingsStore) return settingsStore.get();
   return {
+    language: "en",
     theme: "dark",
     glass: "subtle",
     provider: {
       kind: "none",
-      baseUrl: "https://api.openai.com/v1",
-      model: "gpt-4o-mini",
+      baseUrl: "",
+      model: "",
       hasApiKey: false,
+      reasoningEffort: "auto",
+      contextWindow: 128_000,
+      compactionRatio: 0.8,
     },
-    agent: { autoImplement: true, temperature: 0.2, maxTokens: 8000 },
-    identity: { actorId: "user:uninitialized", name: "Jin user", email: "" },
+    agent: {
+      runtime: "custom",
+      autoImplement: true,
+      semanticScan: true,
+      temperature: 0.2,
+      maxTokens: 8000,
+    },
+    identity: { actorId: "user:uninitialized", name: t("common.jinUser"), email: "" },
     ui: { reduceMotion: false },
+    updates: { autoCheck: true, feedUrl: "" },
   };
 }
 
@@ -124,7 +176,7 @@ function emptyState(): AppState {
       symbols: 0,
       nodes: 0,
       edges: 0,
-      message: "Open a project to begin.",
+      message: t("scan.idle"),
       updatedAt: null,
     },
     lsp: [],
@@ -135,7 +187,27 @@ function emptyState(): AppState {
       warnings: [],
       lastRecordId: null,
     },
-    agent: { phase: "idle", message: "Ready." },
+    metrics: {
+      approval: { count: 0, averageMs: null, medianMs: null },
+      drift: { implemented: 0, drifted: 0, rate: null },
+      reuse: { applicable: 0, passed: 0, skipped: 0, failed: 0, rate: null },
+      usage: {
+        calls: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+        pricedCalls: 0,
+      },
+    },
+    context: {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      model: emptySettings().provider.model,
+      updatedAt: null,
+    },
+    agent: { phase: "idle", message: t("scan.ready") },
     fold: null,
   };
 }
@@ -154,18 +226,30 @@ function broadcastState(): void {
 }
 
 function requireSession(): ProjectSession {
-  if (!activeSession) throw new Error("Open a Jin project first.");
+  if (!activeSession) throw new Error(t("error.openProjectFirst"));
   return activeSession;
 }
 
 function requireSettings(): SettingsStore {
-  if (!settingsStore) throw new Error("Jin settings are not initialized yet.");
+  if (!settingsStore) throw new Error(t("error.settingsNotReady"));
   return settingsStore;
 }
 
 function requireDatabase(): AppDatabase {
-  if (!appDatabase) throw new Error("Jin's application database is not initialized yet.");
+  if (!appDatabase) throw new Error(t("error.databaseNotReady"));
   return appDatabase;
+}
+
+function requireMarketplace(): LspMarketplace {
+  if (!lspMarketplace) throw new Error(t("error.marketplaceNotReady"));
+  return lspMarketplace;
+}
+
+function requireUpdateService(): UpdateService {
+  if (!updateService) {
+    throw new Error(t("settings.updateChecking"));
+  }
+  return updateService;
 }
 
 function applyNativeTheme(theme: AppSettings["theme"]): void {
@@ -173,22 +257,18 @@ function applyNativeTheme(theme: AppSettings["theme"]): void {
 }
 
 function showMessage(options: MessageBoxOptions) {
-  return mainWindow
-    ? dialog.showMessageBox(mainWindow, options)
-    : dialog.showMessageBox(options);
+  return mainWindow ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options);
 }
 
 function showOpenDialog(options: OpenDialogOptions) {
-  return mainWindow
-    ? dialog.showOpenDialog(mainWindow, options)
-    : dialog.showOpenDialog(options);
+  return mainWindow ? dialog.showOpenDialog(mainWindow, options) : dialog.showOpenDialog(options);
 }
 
 async function pickProjectDirectory(title: string): Promise<string | null> {
   const result = await showOpenDialog({
     title,
     properties: ["openDirectory", "createDirectory"],
-    buttonLabel: "Choose folder",
+    buttonLabel: t("dialog.chooseFolder"),
   });
   return result.canceled ? null : (result.filePaths[0] ?? null);
 }
@@ -196,11 +276,10 @@ async function pickProjectDirectory(title: string): Promise<string | null> {
 async function confirmInitialize(root: string): Promise<boolean> {
   const result = await showMessage({
     type: "question",
-    title: "Initialize Jin",
-    message: `Initialize Jin in “${root}”?`,
-    detail:
-      "Jin creates a .jin/ directory containing the append-only architecture WAL, then scans the source tree to prepare the first import proposal. Approved history is never overwritten.",
-    buttons: ["Initialize", "Cancel"],
+    title: t("dialog.initializeTitle"),
+    message: t("dialog.initializeMessage", { root }),
+    detail: t("dialog.initializeDetail"),
+    buttons: [t("dialog.initialize"), t("common.cancel")],
     defaultId: 0,
     cancelId: 1,
     noLink: true,
@@ -213,8 +292,12 @@ async function openProjectPath(
   options: { initialize?: boolean } = {},
 ): Promise<AppState> {
   const selected = resolve(inputPath);
-  if (!existsSync(selected)) throw new Error(`The folder does not exist: ${selected}`);
-  if (!statSync(selected).isDirectory()) throw new Error(`Not a folder: ${selected}`);
+  if (!existsSync(selected)) {
+    throw new Error(t("error.folderMissing", { path: selected }));
+  }
+  if (!statSync(selected).isDirectory()) {
+    throw new Error(t("error.notFolder", { path: selected }));
+  }
 
   const located = locateProject(selected);
   const root = located?.root ?? selected;
@@ -236,6 +319,7 @@ async function openProjectPath(
     settings: requireSettings(),
     recentProjects,
     emit: (event) => sendEvent(event),
+    marketplace: requireMarketplace(),
   });
 
   activeSession = next;
@@ -258,13 +342,13 @@ async function openProjectPath(
 }
 
 async function openProjectFromDialog(): Promise<AppState> {
-  const path = await pickProjectDirectory("Open a Jin project folder");
+  const path = await pickProjectDirectory(t("dialog.openProjectTitle"));
   if (!path) return sessionState();
   return openProjectPath(path);
 }
 
 async function createProjectFromDialog(): Promise<AppState> {
-  const path = await pickProjectDirectory("Choose a folder for the new Jin project");
+  const path = await pickProjectDirectory(t("dialog.newProjectTitle"));
   if (!path) return sessionState();
   if (existsSync(join(path, ".jin"))) {
     return openProjectPath(path);
@@ -287,34 +371,28 @@ async function showMenuError(title: string, error: unknown): Promise<void> {
     type: "error",
     title,
     message,
-    buttons: ["OK"],
+    buttons: [t("dialog.ok")],
     noLink: true,
   });
 }
 
 function sendMenu(action: MenuAction, path?: string): void {
-  const event: JinEvent = path
-    ? { type: "menu", action, path }
-    : { type: "menu", action };
+  const event: JinEvent = path ? { type: "menu", action, path } : { type: "menu", action };
   sendEvent(event);
 }
 
 function showAbout(): void {
-  const detail = [
-    "Architecture-first coding agent.",
-    "",
-    `Electron ${process.versions.electron}`,
-    `Chromium ${process.versions.chrome}`,
-    `Node ${process.versions.node}`,
-    "",
-    "Intent → L0/L1 architecture → one approval → code → conformance.",
-  ].join("\n");
+  const detail = t("dialog.aboutDetail", {
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+  });
   void showMessage({
     type: "info",
-    title: "About Jin",
-    message: `Jin ${app.getVersion()}`,
+    title: t("dialog.aboutTitle"),
+    message: t("dialog.aboutMessage", { version: app.getVersion() }),
     detail,
-    buttons: ["OK"],
+    buttons: [t("dialog.ok")],
     noLink: true,
   });
 }
@@ -323,9 +401,9 @@ async function installDriverFromMenu(): Promise<void> {
   if (!activeSession) {
     await showMessage({
       type: "info",
-      title: "No project open",
-      message: "Open a Jin project before installing the team merge driver.",
-      buttons: ["OK"],
+      title: t("dialog.noProject"),
+      message: t("dialog.installDriverFirst"),
+      buttons: [t("dialog.ok")],
     });
     return;
   }
@@ -333,27 +411,27 @@ async function installDriverFromMenu(): Promise<void> {
     const result = await activeSession.installMergeDriver();
     await showMessage({
       type: result.ok ? "info" : "error",
-      title: "Jin WAL merge driver",
+      title: t("dialog.driverTitle"),
       message: result.message,
-      buttons: ["OK"],
+      buttons: [t("dialog.ok")],
       noLink: true,
     });
   } catch (error) {
-    await showMenuError("Could not install merge driver", error);
+    await showMenuError(t("dialog.installDriverError"), error);
   }
 }
 
 function recentProjectMenu(): MenuItemConstructorOptions[] {
   const projects = recentProjects();
   if (projects.length === 0) {
-    return [{ label: "No recent projects", enabled: false }];
+    return [{ label: t("menu.noRecent"), enabled: false }];
   }
   return projects.map((project) => ({
     label: project.name,
     sublabel: project.path,
     click: () => {
       void openProjectPath(project.path).catch((error: unknown) =>
-        showMenuError("Could not open project", error),
+        showMenuError(t("dialog.openError"), error),
       );
     },
   }));
@@ -368,50 +446,50 @@ function buildApplicationMenu(): Menu {
     template.push({
       label: app.name,
       submenu: [
-        { role: "about" },
+        { role: "about", label: t("menu.about") },
         { type: "separator" },
         {
-          label: "Settings…",
+          label: t("menu.settings"),
           accelerator: "CmdOrCtrl+,",
           click: () => sendMenu("settings"),
         },
         { type: "separator" },
-        { role: "services" },
+        { role: "services", label: t("menu.services") },
         { type: "separator" },
-        { role: "hide" },
-        { role: "hideOthers" },
-        { role: "unhide" },
+        { role: "hide", label: t("menu.hide") },
+        { role: "hideOthers", label: t("menu.hideOthers") },
+        { role: "unhide", label: t("menu.showAll") },
         { type: "separator" },
-        { role: "quit" },
+        { role: "quit", label: t("menu.quit") },
       ],
     });
   }
 
   template.push({
-    label: "File",
+    label: t("menu.file"),
     submenu: [
       {
-        label: "New Project…",
+        label: t("menu.newProject"),
         accelerator: "CmdOrCtrl+Shift+N",
         click: () => {
           void createProjectFromDialog().catch((error: unknown) =>
-            showMenuError("Could not create project", error),
+            showMenuError(t("dialog.createError"), error),
           );
         },
       },
       {
-        label: "Open Project…",
+        label: t("menu.openProject"),
         accelerator: "CmdOrCtrl+O",
         click: () => {
           void openProjectFromDialog().catch((error: unknown) =>
-            showMenuError("Could not open project", error),
+            showMenuError(t("dialog.openError"), error),
           );
         },
       },
-      { label: "Open Recent", submenu: recentProjectMenu() },
+      { label: t("menu.openRecent"), submenu: recentProjectMenu() },
       { type: "separator" },
       {
-        label: "Close Project",
+        label: t("menu.closeProject"),
         enabled: hasProject,
         click: () => {
           closeProject();
@@ -422,77 +500,85 @@ function buildApplicationMenu(): Menu {
         : ([
             { type: "separator" },
             {
-              label: "Settings…",
+              label: t("menu.settings"),
               accelerator: "CmdOrCtrl+,",
               click: () => sendMenu("settings"),
             },
             { type: "separator" },
-            { role: "quit", label: "Quit Jin" },
+            { role: "quit", label: t("menu.quit") },
           ] satisfies MenuItemConstructorOptions[])),
     ],
   });
 
   template.push({
-    label: "Edit",
+    label: t("menu.edit"),
     submenu: [
-      { role: "undo" },
-      { role: "redo" },
+      { role: "undo", label: t("menu.undo") },
+      { role: "redo", label: t("menu.redo") },
       { type: "separator" },
-      { role: "cut" },
-      { role: "copy" },
-      { role: "paste" },
-      { role: "pasteAndMatchStyle" },
-      { role: "delete" },
-      { role: "selectAll" },
+      { role: "cut", label: t("menu.cut") },
+      { role: "copy", label: t("menu.copy") },
+      { role: "paste", label: t("menu.paste") },
+      { role: "pasteAndMatchStyle", label: t("menu.pasteMatch") },
+      { role: "delete", label: t("menu.delete") },
+      { role: "selectAll", label: t("menu.selectAll") },
     ],
   });
 
   template.push({
-    label: "View",
+    label: t("menu.view"),
     submenu: [
-      { role: "reload" },
-      { role: "forceReload" },
-      ...(VITE_DEV_SERVER_URL ? [{ role: "toggleDevTools" } as const] : []),
+      { role: "reload", label: t("menu.reload") },
+      { role: "forceReload", label: t("menu.forceReload") },
+      ...(VITE_DEV_SERVER_URL
+        ? [{ role: "toggleDevTools", label: t("menu.devTools") } as const]
+        : []),
       { type: "separator" },
-      { role: "resetZoom" },
-      { role: "zoomIn" },
-      { role: "zoomOut" },
+      { role: "resetZoom", label: t("menu.resetZoom") },
+      { role: "zoomIn", label: t("menu.zoomIn") },
+      { role: "zoomOut", label: t("menu.zoomOut") },
       { type: "separator" },
-      { role: "togglefullscreen" },
+      { role: "togglefullscreen", label: t("menu.fullscreen") },
     ],
   });
 
   template.push({
-    label: "Project",
+    label: t("menu.project"),
     submenu: [
       {
-        label: "Scan Source",
+        label: t("menu.commandPalette"),
+        accelerator: "CmdOrCtrl+K",
+        click: () => sendMenu("command-palette"),
+      },
+      { type: "separator" },
+      {
+        label: t("menu.scan"),
         accelerator: "CmdOrCtrl+Shift+S",
         enabled: hasProject,
         click: () => sendMenu("scan"),
       },
       { type: "separator" },
       {
-        label: "Approve Current Proposal",
+        label: t("menu.approve"),
         accelerator: "CmdOrCtrl+Shift+Enter",
         enabled: hasProject,
         click: () => sendMenu("approve"),
       },
       {
-        label: "Reject Current Proposal",
+        label: t("menu.reject"),
         enabled: hasProject,
         click: () => sendMenu("reject"),
       },
       { type: "separator" },
       {
-        label: "Toggle Intent Panel",
+        label: t("menu.toggleIntents"),
         accelerator: "CmdOrCtrl+Alt+I",
         enabled: hasProject,
         click: () => sendMenu("toggle-intents"),
       },
       { type: "separator" },
       {
-        label: "Install Git Merge Driver",
+        label: t("menu.installDriver"),
         enabled: hasProject,
         click: () => {
           void installDriverFromMenu();
@@ -502,11 +588,11 @@ function buildApplicationMenu(): Menu {
   });
 
   template.push({
-    label: "Help",
+    label: t("menu.help"),
     submenu: [
-      ...(isMac ? [] : ([{ label: "About Jin", click: showAbout }] as const)),
+      ...(isMac ? [] : ([{ label: t("menu.about"), click: showAbout }] as const)),
       {
-        label: "Architecture WAL",
+        label: t("menu.wal"),
         click: () => {
           void shell.openExternal("https://github.com/");
         },
@@ -534,110 +620,334 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.closeProject, () => closeProject());
 
   ipcMain.handle(IPC_CHANNELS.chooseProjectDirectory, () =>
-    pickProjectDirectory("Choose a project folder"),
+    pickProjectDirectory(t("dialog.chooseProjectTitle")),
   );
 
   ipcMain.handle(IPC_CHANNELS.refresh, async () => requireSession().refresh());
 
   ipcMain.handle(IPC_CHANNELS.scan, async () => requireSession().scan());
 
+  ipcMain.handle(IPC_CHANNELS.amendArchitecture, async (_event, versionId: unknown) => {
+    if (typeof versionId !== "string" || !versionId) {
+      throw new Error(t("error.versionIdRequired"));
+    }
+    return requireSession().amendArchitecture(versionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.mergeIntent, async () => requireSession().mergeIntent());
+
   ipcMain.handle(IPC_CHANNELS.sendMessage, async (_event, text: unknown) => {
-    if (typeof text !== "string") throw new Error("Message text must be a string.");
+    if (typeof text !== "string") throw new Error(t("error.messageTextString"));
     return requireSession().sendMessage(text);
   });
 
-  ipcMain.handle(
-    IPC_CHANNELS.approveProposal,
-    async (_event, id: unknown, note: unknown) => {
-      if (typeof id !== "string") throw new Error("Proposal id must be a string.");
-      return requireSession().approveProposal(
-        id,
-        typeof note === "string" ? note : "",
-      );
-    },
-  );
+  ipcMain.handle(IPC_CHANNELS.approveProposal, async (_event, id: unknown, note: unknown) => {
+    if (typeof id !== "string") throw new Error(t("error.proposalIdString"));
+    return requireSession().approveProposal(id, typeof note === "string" ? note : "");
+  });
 
-  ipcMain.handle(
-    IPC_CHANNELS.rejectProposal,
-    async (_event, id: unknown, note: unknown) => {
-      if (typeof id !== "string") throw new Error("Proposal id must be a string.");
-      return requireSession().rejectProposal(
-        id,
-        typeof note === "string" ? note : "",
-      );
-    },
-  );
+  ipcMain.handle(IPC_CHANNELS.rejectProposal, async (_event, id: unknown, note: unknown) => {
+    if (typeof id !== "string") throw new Error(t("error.proposalIdString"));
+    return requireSession().rejectProposal(id, typeof note === "string" ? note : "");
+  });
 
-  ipcMain.handle(
-    IPC_CHANNELS.retryImplementation,
-    async (_event, versionId: unknown) => {
-      if (versionId !== undefined && typeof versionId !== "string") {
-        throw new Error("Version id must be a string.");
-      }
-      return requireSession().retryImplementation(versionId);
-    },
-  );
+  ipcMain.handle(IPC_CHANNELS.retryImplementation, async (_event, versionId: unknown) => {
+    if (versionId !== undefined && typeof versionId !== "string") {
+      throw new Error(t("error.versionIdString"));
+    }
+    return requireSession().retryImplementation(versionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.replayVersion, (_event, versionId: unknown): VersionReplay => {
+    if (typeof versionId !== "string" || !versionId) {
+      throw new Error(t("error.versionIdRequired"));
+    }
+    return requireSession().replayVersion(versionId);
+  });
 
   ipcMain.handle(IPC_CHANNELS.cancelAgent, () => {
     requireSession().cancelAgent();
   });
 
-  ipcMain.handle(IPC_CHANNELS.getFileTree, (): FileNode =>
-    requireSession().getFileTree(),
-  );
+  ipcMain.handle(IPC_CHANNELS.getFileTree, (): FileNode => requireSession().getFileTree());
 
   ipcMain.handle(IPC_CHANNELS.readFile, (_event, path: unknown): FileContent => {
-    if (typeof path !== "string" || !path) throw new Error("A file path is required.");
+    if (typeof path !== "string" || !path) {
+      throw new Error(t("error.filePathRequired"));
+    }
     return requireSession().readFile(path);
   });
 
-  ipcMain.handle(
-    IPC_CHANNELS.openInExternalEditor,
-    async (_event, path: unknown) => {
-      if (typeof path !== "string" || !path) throw new Error("A file path is required.");
-      const absolute = requireSession().resolveExternalFile(path);
-      const error = await shell.openPath(absolute);
-      if (error) throw new Error(error);
-    },
-  );
+  ipcMain.handle(IPC_CHANNELS.openInExternalEditor, async (_event, path: unknown) => {
+    if (typeof path !== "string" || !path) {
+      throw new Error(t("error.filePathRequired"));
+    }
+    const absolute = requireSession().resolveExternalFile(path);
+    const error = await shell.openPath(absolute);
+    if (error) throw new Error(error);
+  });
 
   ipcMain.handle(IPC_CHANNELS.getSettings, (): AppSettings => requireSettings().get());
 
-  ipcMain.handle(
-    IPC_CHANNELS.saveSettings,
-    (_event, patch: unknown): AppSettings => {
-      if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
-        throw new Error("Settings patch must be an object.");
-      }
-      const settings = requireSettings().save(patch as SettingsPatch);
-      applyNativeTheme(settings.theme);
-      if (activeSession) {
-        activeSession.setConfigTheme(settings.theme, settings.glass);
-      }
-      broadcastState();
-      return settings;
-    },
+  ipcMain.handle(IPC_CHANNELS.saveSettings, (_event, patch: unknown): AppSettings => {
+    if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
+      throw new Error(t("error.settingsObject"));
+    }
+    const settings = requireSettings().save(patch as SettingsPatch);
+    applyNativeTheme(settings.theme);
+    if (activeSession) {
+      activeSession.setConfigTheme(settings.theme, settings.glass);
+    }
+    if (updateService) {
+      updateService.configure({
+        autoCheck: settings.updates.autoCheck,
+        feedUrl: settings.updates.feedUrl,
+      });
+    }
+    rebuildApplicationMenu();
+    broadcastState();
+    return settings;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.getUpdateState, (): UpdateState => requireUpdateService().getState());
+  ipcMain.handle(IPC_CHANNELS.checkForUpdates, (): Promise<UpdateState> =>
+    requireUpdateService().check(),
   );
+  ipcMain.handle(IPC_CHANNELS.downloadUpdate, (): Promise<UpdateState> =>
+    requireUpdateService().download(),
+  );
+  ipcMain.handle(IPC_CHANNELS.installUpdate, (): void => {
+    if (!requireUpdateService().install()) {
+      throw new Error(t("settings.updateError", { message: "No downloaded update" }));
+    }
+  });
 
   ipcMain.handle(IPC_CHANNELS.getTools, (): ToolsInfo =>
     activeSession ? activeSession.getTools() : emptyTools(),
   );
 
+  ipcMain.handle(IPC_CHANNELS.refreshTools, async (): Promise<ToolsInfo> =>
+    activeSession ? activeSession.refreshTools() : emptyTools(),
+  );
+
   ipcMain.handle(
-    IPC_CHANNELS.refreshTools,
-    async (): Promise<ToolsInfo> =>
-      activeSession ? activeSession.refreshTools() : emptyTools(),
+    IPC_CHANNELS.searchExtensions,
+    async (_event, query: unknown, limit: unknown): Promise<MarketplaceSearchResult> => {
+      if (typeof query !== "string") throw new Error(t("error.queryString"));
+      const pageSize =
+        typeof limit === "number" && Number.isFinite(limit)
+          ? Math.max(1, Math.min(30, Math.trunc(limit)))
+          : 12;
+      return requireMarketplace().search(query, pageSize);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.installLspExtension,
+    async (_event, id: unknown): Promise<LspInstallResult> => {
+      if (typeof id !== "string" || !id) throw new Error(t("error.extensionId"));
+      try {
+        const outcome = await requireMarketplace().install(id);
+        const lsp = activeSession?.refreshLsp() ?? [];
+        return {
+          ok: true,
+          message: t("settings.marketplace.installed", {
+            name: outcome.extension.displayName,
+            version: outcome.extension.version,
+          }),
+          extension: outcome.extension,
+          lsp,
+        };
+      } catch (error) {
+        if (error instanceof LicenseGatedServerError) {
+          return {
+            ok: false,
+            message: t("settings.marketplace.licenseGated"),
+            extension: null,
+            lsp: activeSession?.refreshLsp() ?? [],
+          };
+        }
+        if (error instanceof NoStandaloneServerError) {
+          return {
+            ok: false,
+            message: t("settings.marketplace.noServer"),
+            extension: null,
+            lsp: activeSession?.refreshLsp() ?? [],
+          };
+        }
+        return {
+          ok: false,
+          message: t("settings.marketplace.failed", {
+            message: error instanceof Error ? error.message : String(error),
+          }),
+          extension: null,
+          lsp: activeSession?.refreshLsp() ?? [],
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.uninstallLspExtension,
+    async (_event, id: unknown): Promise<LspInstallResult> => {
+      if (typeof id !== "string" || !id) throw new Error(t("error.extensionId"));
+      const removed = requireMarketplace().uninstall(id);
+      const lsp = activeSession?.refreshLsp() ?? [];
+      return {
+        ok: Boolean(removed),
+        message: removed
+          ? t("settings.marketplace.uninstalled", { name: removed.displayName })
+          : t("settings.marketplace.notInstalled", { id }),
+        extension: null,
+        lsp,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.searchCode,
+    (_event, query: unknown, limit: unknown): ReuseCandidate[] => {
+      if (typeof query !== "string") throw new Error(t("error.queryString"));
+      const max = typeof limit === "number" && Number.isFinite(limit) ? limit : 12;
+      return requireSession().searchCode(query, Math.max(1, Math.min(30, Math.trunc(max))));
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.listModels,
+    async (_event, input: unknown): Promise<ProviderModelCatalog> => {
+      if (typeof input !== "object" || input === null || Array.isArray(input)) {
+        throw new ModelCatalogError("Invalid model catalog request.");
+      }
+      const request = input as Partial<ProviderModelRequest>;
+      if (request.kind !== "openai-compatible" && request.kind !== "ollama") {
+        throw new ModelCatalogError("Choose a provider before fetching models.");
+      }
+      if (typeof request.baseUrl !== "string" || !request.baseUrl.trim()) {
+        throw new ModelCatalogError("Enter the provider base URL first.");
+      }
+      if (
+        request.apiKey !== undefined &&
+        request.apiKey !== null &&
+        typeof request.apiKey !== "string"
+      ) {
+        throw new ModelCatalogError("Invalid API key.");
+      }
+      const storedKey = requireSettings().getProviderApiKey();
+      const apiKey =
+        request.apiKey === undefined
+          ? storedKey
+          : request.apiKey === null
+            ? null
+            : request.apiKey.trim() || null;
+      return fetchModelCatalog({
+        kind: request.kind,
+        baseUrl: request.baseUrl.trim(),
+        apiKey,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.mcpCall,
+    async (_event, server: unknown, tool: unknown, args: unknown): Promise<McpCallResult> => {
+      if (typeof server !== "string" || !server) {
+        throw new Error(t("error.mcpServer"));
+      }
+      if (typeof tool !== "string" || !tool) throw new Error(t("error.mcpTool"));
+      if (
+        args !== undefined &&
+        (typeof args !== "object" || args === null || Array.isArray(args))
+      ) {
+        throw new Error(t("error.mcpArgs"));
+      }
+      return requireSession().callMcpTool(
+        server,
+        tool,
+        (args as Record<string, unknown> | undefined) ?? {},
+      );
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.gitStatus, (): Promise<GitStatus> =>
+    gitStatus(requireSession().root),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.gitBranches, (): Promise<GitBranchList> =>
+    gitBranches(requireSession().root),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.gitCheckout,
+    (_event, name: unknown, create: unknown, dirtyAction: unknown): Promise<GitActionResult> => {
+      if (typeof name !== "string" || !name.trim()) {
+        throw new Error(t("error.gitBranch"));
+      }
+      if (create !== undefined && typeof create !== "boolean") {
+        throw new Error(t("error.gitBranch"));
+      }
+      if (dirtyAction !== undefined && dirtyAction !== "carry" && dirtyAction !== "stash") {
+        throw new Error(t("error.gitBranch"));
+      }
+      return gitCheckout(requireSession().root, name, create === true, dirtyAction);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.gitLog, (_event, limit: unknown): Promise<GitCommit[]> => {
+    const count = typeof limit === "number" && Number.isFinite(limit) ? limit : 30;
+    return gitLog(requireSession().root, count);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.gitShow, (_event, hash: unknown): Promise<GitCommitDetail> => {
+    if (typeof hash !== "string" || !hash.trim()) {
+      throw new Error(t("error.gitHashRequired"));
+    }
+    return gitShow(requireSession().root, hash);
+  });
+
+  const gitPaths = (value: unknown): string[] | undefined => {
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item)) {
+      throw new Error(t("error.gitPaths"));
+    }
+    if (value.length > 1_000) throw new Error(t("error.gitPaths"));
+    return value as string[];
+  };
+
+  ipcMain.handle(IPC_CHANNELS.gitStage, (_event, paths: unknown): Promise<GitActionResult> =>
+    gitStage(requireSession().root, gitPaths(paths)),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.gitUnstage, (_event, paths: unknown): Promise<GitActionResult> =>
+    gitUnstage(requireSession().root, gitPaths(paths)),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.gitCommit, (_event, message: unknown): Promise<GitActionResult> => {
+    if (typeof message !== "string") throw new Error(t("error.gitCommitMessage"));
+    return gitCommit(requireSession().root, message);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.gitPush, (): Promise<GitActionResult> =>
+    gitPush(requireSession().root),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.gitPull, (): Promise<GitActionResult> =>
+    gitPull(requireSession().root),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.gitFetch, (): Promise<GitActionResult> =>
+    gitFetch(requireSession().root),
   );
 
   ipcMain.handle(IPC_CHANNELS.installMergeDriver, async () => {
     if (!activeSession) {
-      return { ok: false, message: "Open a project first." };
+      return { ok: false, message: t("dialog.openProjectFirst") };
     }
     return activeSession.installMergeDriver();
   });
 
   ipcMain.handle(IPC_CHANNELS.mergeInstructions, (): string => {
-    if (!activeSession) return "Open a project first.";
+    if (!activeSession) return t("dialog.openProjectFirst");
     return activeSession.mergeInstructions();
   });
 }
@@ -692,13 +1002,70 @@ function createWindow(): BrowserWindow {
   return win;
 }
 
+/** Headless packaged smoke used by CI: verify the renderer and preload load. */
+function runPackagedSmoke(win: BrowserWindow): void {
+  let settled = false;
+  const finish = (ok: boolean, detail: string): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    console.log(`JIN_SMOKE_${ok ? "OK" : "FAIL"}: ${detail}`);
+    setTimeout(() => app.exit(ok ? 0 : 1), 150);
+  };
+  const timer = setTimeout(
+    () => finish(false, "renderer did not finish loading within 30s"),
+    30_000,
+  );
+  timer.unref?.();
+  win.webContents.once("did-fail-load", (_event, code, description, url) => {
+    finish(false, `load failed (${code}) ${description} ${url}`);
+  });
+  win.webContents.once("did-finish-load", () => {
+    setTimeout(() => {
+      void win.webContents
+        .executeJavaScript("typeof window.jin?.getState === 'function'")
+        .then((bridge) =>
+          finish(
+            bridge === true,
+            `bridge=${String(bridge)} version=${app.getVersion()} packaged=${app.isPackaged} platform=${process.platform}`,
+          ),
+        )
+        .catch((error: unknown) =>
+          finish(false, error instanceof Error ? error.message : String(error)),
+        );
+    }, 1_000);
+  });
+}
+
 function initializeApplication(): void {
   appDatabase = openAppDatabase(join(app.getPath("userData"), "jin.db"));
   settingsStore = new SettingsStore(appDatabase);
-  applyNativeTheme(settingsStore.get().theme);
+  lspMarketplace = new LspMarketplace(join(app.getPath("userData"), "lsp-extensions"));
+  const settings = settingsStore.get();
+  applyNativeTheme(settings.theme);
+  updateService = new UpdateService({
+    currentVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    feedUrl: settings.updates.feedUrl,
+    envFeedUrl: process.env.JIN_UPDATE_FEED_URL,
+    autoCheck: settings.updates.autoCheck,
+    devConfigPath: join(app.getPath("userData"), "dev-app-update.yml"),
+    onState: (update) => sendEvent({ type: "update", update }),
+  });
   registerIpcHandlers();
   rebuildApplicationMenu();
-  createWindow();
+  const win = createWindow();
+  if (process.env.JIN_SMOKE_TEST === "1") {
+    runPackagedSmoke(win);
+    return;
+  }
+  void updateService.initialize().then(() => {
+    if (!updateService?.autoCheckEnabled) return;
+    const timer = setTimeout(() => {
+      if (updateService?.getState().canCheck) void updateService.check();
+    }, 4_000);
+    timer.unref?.();
+  });
 }
 
 const hasLock = app.requestSingleInstanceLock();

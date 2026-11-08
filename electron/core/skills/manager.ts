@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { SkillInfo } from "../../../shared/ipc";
 
@@ -71,28 +71,57 @@ function listDirectories(root: string): string[] {
   }
 }
 
+/** User-level skill roots shared by Jin, agents, and cc-switch. */
+export function defaultUserSkillRoots(): string[] {
+  const home = homedir();
+  return [
+    join(home, ".config", "jin", "skills"),
+    join(home, ".agents", "skills"),
+    join(home, ".cc-switch", "skills"),
+  ];
+}
+
 /**
  * Skills are local instruction/tool bundles. They are always available to the
  * agent and audited by the session; enabling one never opens an approval modal.
+ *
+ * Project skills win name collisions, followed by the user roots in priority
+ * order. Symlinked duplicates are deduplicated by their resolved path.
  */
 export class SkillManager {
-  private readonly projectRoot: string;
-  private readonly userRoot: string;
+  private readonly roots: Array<{ path: string; scope: SkillInfo["scope"] }>;
 
-  constructor(projectRoot: string, userRoot = join(homedir(), ".config", "jin", "skills")) {
-    this.projectRoot = join(projectRoot, ".jin", "skills");
-    this.userRoot = userRoot;
+  constructor(
+    projectRoot: string,
+    userRoots: string | readonly string[] = defaultUserSkillRoots(),
+  ) {
+    const extra = typeof userRoots === "string" ? [userRoots] : userRoots;
+    this.roots = [
+      { path: join(projectRoot, ".jin", "skills"), scope: "project" },
+      ...extra.map((path) => ({ path, scope: "user" as const })),
+    ];
   }
 
   listDocuments(): SkillDocument[] {
-    return [
-      ...listDirectories(this.projectRoot).map((directory) =>
-        readSkill(join(directory, "SKILL.md"), "project"),
-      ),
-      ...listDirectories(this.userRoot).map((directory) =>
-        readSkill(join(directory, "SKILL.md"), "user"),
-      ),
-    ].filter((document): document is SkillDocument => document !== null);
+    const seenPaths = new Set<string>();
+    const seenNames = new Set<string>();
+    const documents: SkillDocument[] = [];
+    for (const root of this.roots) {
+      for (const directory of listDirectories(root.path)) {
+        const path = resolve(directory, "SKILL.md");
+        if (seenPaths.has(path)) continue;
+        seenPaths.add(path);
+        const document = readSkill(path, root.scope);
+        if (!document) continue;
+        const name = document.info.name.toLowerCase();
+        if (seenNames.has(name)) continue;
+        seenNames.add(name);
+        documents.push(document);
+      }
+    }
+    return documents.sort((left, right) =>
+      left.info.name.localeCompare(right.info.name),
+    );
   }
 
   list(): SkillInfo[] {

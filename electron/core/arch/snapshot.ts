@@ -341,7 +341,9 @@ export function applyDecision(
       recordId,
     );
   }
-  snapshot.decisions[decision.id] = decision;
+  // `VersionState.decisions` stores WAL record ids, so key the snapshot map the
+  // same way. The payload id fallback keeps direct callers working.
+  snapshot.decisions[recordId || decision.id] = decision;
   return null;
 }
 
@@ -357,7 +359,10 @@ export function applyImplementation(
       recordId,
     );
   }
-  snapshot.implementations[implementation.id] = implementation;
+  // `VersionState.implementations` stores WAL record ids, so key the snapshot
+  // map the same way. Falling back to the payload id keeps direct callers and
+  // pre-existing tests working when no record id is supplied.
+  snapshot.implementations[recordId || implementation.id] = implementation;
   return null;
 }
 

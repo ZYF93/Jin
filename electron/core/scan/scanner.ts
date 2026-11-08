@@ -1,11 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
-import type {
-  ArchEdgeDraft,
-  ArchNodeDraft,
-  L1Kind,
-  NodeKind,
-} from "../../../shared/arch/types";
+import type { ArchEdgeDraft, ArchNodeDraft, L1Kind, NodeKind } from "../../../shared/arch/types";
 import { stableIds } from "../ids/stable";
 import type { JinConfig } from "../project/config";
 
@@ -46,13 +41,33 @@ const MAX_BYTES = 512 * 1024;
 export interface ScanMember {
   name: string;
   kind: "method" | "field" | "property";
+  line?: number;
+  character?: number;
 }
+
+/** Parsed facts cached by file mtime + size; LSP members are merged every scan. */
+export interface ScanManifestEntry {
+  parserVersion: number;
+  mtimeMs: number;
+  size: number;
+  language: string;
+  lines: number;
+  imports: string[];
+  exports: string[];
+  members: ScanMember[];
+  kind: L1Kind;
+  title: string;
+  responsibility: string;
+}
+
+export type ScanManifest = Record<string, ScanManifestEntry>;
 
 export interface ScannedFile {
   path: string;
   absolute: string;
   language: string;
   lines: number;
+  symbolLocations: Record<string, { line: number; character?: number }>;
   bytes: number;
   imports: string[];
   exports: string[];
@@ -78,12 +93,27 @@ export interface ScanResult {
   warnings: string[];
   stats: ScanStats;
   scannedAt: string;
+  manifest: ScanManifest;
 }
 
 export interface ScanOptions {
   maxFiles?: number;
   signal?: AbortSignal;
+  /** Parsed facts from the previous scan, reused when mtime and size match. */
+  manifest?: ScanManifest;
+  /** Optional LSP document symbols merged into the structural parser output. */
+  lspFacts?: ReadonlyMap<
+    string,
+    ReadonlyArray<{
+      name: string;
+      kind: ScanMember["kind"];
+      line?: number;
+      character?: number;
+    }>
+  >;
 }
+
+const SCANNER_PARSER_VERSION = 2;
 
 function isSourceFile(path: string): boolean {
   return SOURCE_EXTENSIONS.has(extname(path).toLowerCase());
@@ -145,7 +175,11 @@ function collectFiles(
         const child = join(absolute, entry.name);
         if (entry.isDirectory()) {
           walk(child);
-        } else if (entry.isFile() && isSourceFile(child) && !ignored(root, child, entry.name, config)) {
+        } else if (
+          entry.isFile() &&
+          isSourceFile(child) &&
+          !ignored(root, child, entry.name, config)
+        ) {
           if (seen.has(child)) continue;
           seen.add(child);
           files.push(child);
@@ -153,7 +187,11 @@ function collectFiles(
       }
       return;
     }
-    if (stats.isFile() && isSourceFile(absolute) && !ignored(root, absolute, basename(absolute), config)) {
+    if (
+      stats.isFile() &&
+      isSourceFile(absolute) &&
+      !ignored(root, absolute, basename(absolute), config)
+    ) {
       if (!seen.has(absolute)) {
         seen.add(absolute);
         files.push(absolute);
@@ -321,8 +359,9 @@ function firstDocComment(text: string): string {
     .slice(0, 260);
 }
 
-function classifyKind(path: string, exports: readonly string[]): L1Kind {
+function classifyKind(path: string, exports: readonly string[], source: string): L1Kind {
   const lower = path.toLowerCase();
+  const code = stripComments(source);
   if (lower.endsWith(".vue") || lower.endsWith(".tsx") || lower.endsWith(".jsx")) {
     return "component";
   }
@@ -336,7 +375,33 @@ function classifyKind(path: string, exports: readonly string[]): L1Kind {
   if (/\/entities?\//.test(lower) || /\/models?\//.test(lower)) return "entity";
   if (/\/types?\//.test(lower) || lower.endsWith(".d.ts")) return "type";
   if (/\/config\//.test(lower) || /config\.(ts|js)$/.test(lower)) return "config";
-  return "function";
+  if (/^\s*export\s+(?:interface|type|enum)\s+/m.test(code)) return "type";
+  const functionFile =
+    /\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(lower) &&
+    /^(?:export\s+(?:default\s+)?(?:async\s+)?function\s+|function\s+|export\s+(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)/m.test(
+      code,
+    );
+  const pythonFunctionFile = lower.endsWith(".py") && /^(?:async\s+)?def\s+/m.test(code);
+  const goFunctionFile = lower.endsWith(".go") && /^func\s+[A-Za-z_]\w*\s*\(/m.test(code);
+  const kotlinFunctionFile = /\.kts?$/.test(lower) && /^fun\s+/m.test(code);
+  if (functionFile || pythonFunctionFile || goFunctionFile || kotlinFunctionFile) {
+    return "function";
+  }
+  if (
+    /\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(lower) &&
+    /^\s*(?:export\s+)?(?:abstract\s+)?class\s+/m.test(code)
+  ) {
+    return "entity";
+  }
+  if (
+    /\.(?:java|kt|kts)$/.test(lower) &&
+    /^\s*(?:(?:public|abstract|data|sealed|open)\s+)*class\s+/m.test(code)
+  ) {
+    return "entity";
+  }
+  if (lower.endsWith(".py") && /^class\s+[A-Za-z_]\w*/m.test(code)) return "entity";
+  if (lower.endsWith(".go") && /^type\s+[A-Za-z_]\w*\s+struct\b/m.test(code)) return "entity";
+  return "module";
 }
 
 function parseTypeScript(text: string): {
@@ -357,12 +422,8 @@ function parseTypeScript(text: string): {
   );
   const exports = unique(
     [
-      ...code.matchAll(
-        /^\s*export\s+(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm,
-      ),
-      ...code.matchAll(
-        /^\s*export\s+(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/gm,
-      ),
+      ...code.matchAll(/^\s*export\s+(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm),
+      ...code.matchAll(/^\s*export\s+(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/gm),
       ...code.matchAll(/^\s*export\s+(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)/gm),
       ...code.matchAll(/^\s*export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm),
     ]
@@ -376,14 +437,16 @@ function parseTypeScript(text: string): {
   };
 }
 
-function parseVue(path: string, text: string): {
+function parseVue(
+  path: string,
+  text: string,
+): {
   imports: string[];
   exports: string[];
   members: ScanMember[];
 } {
-  const scripts = [...text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)]
-    .map((match) => match[1] ?? "")
-    .join("\n");
+  const scriptMatches = [...text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)];
+  const scripts = scriptMatches.map((match) => match[1] ?? "").join("\n");
   if (!scripts.trim()) return { imports: [], exports: [], members: [] };
   const parsed = parseTypeScript(scripts);
   return {
@@ -399,20 +462,24 @@ function parsePython(text: string): {
 } {
   const code = stripComments(text);
   const imports = unique(
-    [...code.matchAll(/^\s*from\s+([A-Za-z_][\w.]*)\s+import\b/gm), ...code.matchAll(/^\s*import\s+([A-Za-z_][\w.]*)/gm)]
+    [
+      ...code.matchAll(/^\s*from\s+([A-Za-z_][\w.]*)\s+import\b/gm),
+      ...code.matchAll(/^\s*import\s+([A-Za-z_][\w.]*)/gm),
+    ]
       .map((match) => match[1])
       .filter((value): value is string => Boolean(value)),
   );
   const classes = [...code.matchAll(/^\s*class\s+([A-Za-z_]\w*)/gm)].map(
     (match) => match[1] as string,
   );
-  const functions = [...code.matchAll(/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/gm)].map(
-    (match) => match[1] as string,
-  );
+  const functionMatches = [...code.matchAll(/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/gm)];
+  const functions = functionMatches.map((match) => match[1] as string);
   return {
     imports,
     exports: unique([...classes, ...functions]).slice(0, 80),
-    members: functions.map((name) => ({ name, kind: "method" as const })).slice(0, 60),
+    members: functionMatches
+      .slice(0, 60)
+      .map((match) => ({ name: match[1] as string, kind: "method" as const })),
   };
 }
 
@@ -432,13 +499,19 @@ function parseJvm(text: string): {
       /(?:^|\n)\s*(?:(?:public|private|protected|abstract|final|open|data|sealed)\s+)*(?:class|interface|enum|object|record)\s+([A-Za-z_]\w*)/g,
     ),
   ].map((match) => match[1] as string);
-  const funcs = [
-    ...code.matchAll(/(?:^|\n)\s*(?:fun|(?:public|private|protected|static|final|abstract|synchronized|native|override|suspend)\s+)[\w<>[], ?]*\s*([A-Za-z_]\w*)\s*\(/g),
-  ].map((match) => match[1] as string);
+  const funcMatches = [
+    ...code.matchAll(/(?:^|\n)\s*fun\s+(?:<[^>]+>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(/g),
+    ...code.matchAll(
+      /(?:^|\n)\s*(?:public|private|protected|static|final|abstract|synchronized|native|override|suspend|open|internal|inline|operator|infix|tailrec|external|actual|expect)\s+(?:[\w<>,[\] ?]+\s+)?([A-Za-z_]\w*)\s*\(/g,
+    ),
+  ];
+  const funcs = funcMatches.map((match) => match[1] as string);
   return {
     imports,
     exports: unique([...classes, ...funcs]).slice(0, 80),
-    members: funcs.map((name) => ({ name, kind: "method" as const })).slice(0, 60),
+    members: funcMatches
+      .slice(0, 60)
+      .map((match) => ({ name: match[1] as string, kind: "method" as const })),
   };
 }
 
@@ -462,17 +535,21 @@ function parseGo(text: string): {
   const types = [...code.matchAll(/^\s*type\s+([A-Za-z_]\w*)\s+(?:struct|interface)/gm)].map(
     (match) => match[1] as string,
   );
-  const funcs = [
-    ...code.matchAll(/^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(/gm),
-  ].map((match) => match[1] as string);
+  const funcMatches = [...code.matchAll(/^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(/gm)];
+  const funcs = funcMatches.map((match) => match[1] as string);
   return {
     imports,
     exports: unique([...types, ...funcs]).slice(0, 80),
-    members: funcs.map((name) => ({ name, kind: "method" as const })).slice(0, 60),
+    members: funcMatches
+      .slice(0, 60)
+      .map((match) => ({ name: match[1] as string, kind: "method" as const })),
   };
 }
 
-function parseFile(path: string, text: string): {
+function parseFile(
+  path: string,
+  text: string,
+): {
   imports: string[];
   exports: string[];
   members: ScanMember[];
@@ -503,7 +580,12 @@ function resolveImport(
   specifier: string,
   files: ReadonlySet<string>,
 ): string | null {
-  if (!specifier.startsWith(".") && !specifier.startsWith("/") && !specifier.startsWith("@/") && !specifier.startsWith("~/")) {
+  if (
+    !specifier.startsWith(".") &&
+    !specifier.startsWith("/") &&
+    !specifier.startsWith("@/") &&
+    !specifier.startsWith("~/")
+  ) {
     return null;
   }
   const clean = specifier.split("?")[0]?.split("#")[0] ?? specifier;
@@ -579,6 +661,7 @@ export function scanProject(
   const fileSet = new Set(collected.files.map((file) => relativePath(root, file)));
   const warnings = [...collected.warnings];
   const files: ScannedFile[] = [];
+  const manifest: ScanManifest = {};
 
   for (const absolute of collected.files) {
     if (options.signal?.aborted) throw new Error("Scan cancelled");
@@ -588,39 +671,119 @@ export function scanProject(
     } catch {
       continue;
     }
-    if (stats.size > MAX_BYTES) {
-      warnings.push(`Skipped large file: ${relativePath(root, absolute)}`);
-      continue;
-    }
-    let text: string;
-    try {
-      text = readFileSync(absolute, "utf8");
-    } catch {
-      warnings.push(`Could not read ${relativePath(root, absolute)}`);
-      continue;
-    }
     const path = relativePath(root, absolute);
-    const parsed = parseFile(path, text);
-    const exports = unique(parsed.exports);
-    const kind = classifyKind(path, exports);
-    const title = basename(path).startsWith("index.")
-      ? basename(dirname(path)) || basename(path)
-      : basename(path).replace(/\.[^.]+$/, "");
-    const doc = firstDocComment(text);
-    const responsibility =
-      doc ||
-      (exports.length > 0
-        ? `Provides ${exports.slice(0, 4).join(", ")}${exports.length > 4 ? "…" : ""}.`
-        : `${kind} source unit.`);
+    if (stats.size > MAX_BYTES) {
+      warnings.push(`Skipped large file: ${path}`);
+      continue;
+    }
+    const cached = options.manifest?.[path];
+    const cacheHit =
+      cached !== undefined &&
+      cached.parserVersion === SCANNER_PARSER_VERSION &&
+      cached.mtimeMs === stats.mtimeMs &&
+      cached.size === stats.size;
+    let structural: {
+      imports: string[];
+      exports: string[];
+      members: ScanMember[];
+      language: string;
+    };
+    let lines: number;
+    let exports: string[];
+    let kind: L1Kind;
+    let title: string;
+    let responsibility: string;
+    if (cacheHit && cached) {
+      structural = {
+        imports: cached.imports,
+        exports: cached.exports,
+        members: cached.members,
+        language: cached.language,
+      };
+      lines = cached.lines;
+      exports = cached.exports;
+      kind = cached.kind;
+      title = cached.title;
+      responsibility = cached.responsibility;
+    } else {
+      let text: string;
+      try {
+        text = readFileSync(absolute, "utf8");
+      } catch {
+        warnings.push(`Could not read ${path}`);
+        continue;
+      }
+      structural = parseFile(path, text);
+      lines = text.split("\n").length;
+      exports = unique(structural.exports);
+      kind = classifyKind(path, exports, text);
+      title = basename(path).startsWith("index.")
+        ? basename(dirname(path)) || basename(path)
+        : basename(path).replace(/\.[^.]+$/, "");
+      const doc = firstDocComment(text);
+      responsibility =
+        doc ||
+        (exports.length > 0
+          ? `Provides ${exports.slice(0, 4).join(", ")}${exports.length > 4 ? "…" : ""}.`
+          : `${kind} source unit.`);
+    }
+    manifest[path] = {
+      parserVersion: SCANNER_PARSER_VERSION,
+      mtimeMs: stats.mtimeMs,
+      size: stats.size,
+      language: structural.language,
+      lines,
+      imports: unique(structural.imports),
+      exports: structural.exports,
+      members: structural.members,
+      kind,
+      title,
+      responsibility,
+    };
+    // LSP members are merged on every scan so stale symbols never outlive a server.
+    const members = [...structural.members];
+    const memberIndexes = new Map(
+      members.map((member, index) => [`${member.kind}:${member.name}`, index]),
+    );
+    const symbolLocations: Record<string, { line: number; character?: number }> = {};
+    for (const fact of options.lspFacts?.get(path) ?? []) {
+      if (fact.line && !symbolLocations[fact.name]) {
+        symbolLocations[fact.name] = {
+          line: fact.line,
+          ...(fact.character ? { character: fact.character } : {}),
+        };
+      }
+      const key = `${fact.kind}:${fact.name}`;
+      const existingIndex = memberIndexes.get(key);
+      if (existingIndex !== undefined) {
+        if (fact.line && !members[existingIndex]?.line) {
+          members[existingIndex] = {
+            ...members[existingIndex]!,
+            line: fact.line,
+            ...(fact.character ? { character: fact.character } : {}),
+          };
+        }
+        continue;
+      }
+      if (members.length >= 60) continue;
+      memberIndexes.set(key, members.length);
+      members.push({
+        name: fact.name,
+        kind: fact.kind,
+        ...(fact.line ? { line: fact.line } : {}),
+        ...(fact.character ? { character: fact.character } : {}),
+      });
+    }
     files.push({
       path,
       absolute,
-      language: parsed.language,
-      lines: text.split("\n").length,
+      language: structural.language,
+      lines,
+      symbolLocations,
       bytes: stats.size,
-      imports: unique(parsed.imports),
+      imports: unique(structural.imports),
       exports,
-      members: parsed.members,
+      members,
       kind,
       title,
       responsibility,
@@ -673,7 +836,9 @@ export function scanProject(
       }
     }
   }
-  const sortedDirs = [...dirs].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
+  const sortedDirs = [...dirs].sort(
+    (a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b),
+  );
   for (const dir of sortedDirs) {
     const node = moduleNodesForDirectory(dir, modules, systemId);
     if (!nodes.some((candidate) => candidate.id === node.id)) nodes.push(node);
@@ -705,6 +870,7 @@ export function scanProject(
         bytes: file.bytes,
         imports: file.imports,
         exports: file.exports,
+        symbolLocations: file.symbolLocations,
         scanKind: file.kind,
       },
     };
@@ -729,7 +895,13 @@ export function scanProject(
         responsibility: `${member.kind} ${member.name} on ${file.title}.`,
         intentId: null,
         status: "active",
-        metadata: { origin: "scan", scanned: true, language: file.language },
+        metadata: {
+          origin: "scan",
+          scanned: true,
+          language: file.language,
+          ...(member.line ? { line: member.line } : {}),
+          ...(member.character ? { character: member.character } : {}),
+        },
       };
       nodes.push(facet);
       addEdge(fileNode.id, "contains", facet.id);
@@ -793,12 +965,26 @@ export function scanProject(
       languages: languageCounts,
     },
     scannedAt: new Date().toISOString(),
+    manifest,
   };
 }
 
 /** A deterministic file key for verification and RAG. */
 export function fileNodeId(path: string): string {
   return stableIds.node("file", path);
+}
+
+/** Lightweight source listing for LSP discovery; does not read file bodies. */
+export function listSourceFiles(
+  root: string,
+  config: JinConfig,
+  options: ScanOptions = {},
+): { files: string[]; warnings: string[] } {
+  const collected = collectFiles(root, config, options);
+  return {
+    files: collected.files.map((file) => relativePath(root, file)),
+    warnings: collected.warnings,
+  };
 }
 
 export function scanRootPath(root: string): string {

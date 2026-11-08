@@ -99,6 +99,20 @@ function validateIntent(payload: unknown, versionId: string): string[] {
   if (!isNonEmptyString(payload.goal)) issues.push("intent.goal is required");
   if (!Array.isArray(payload.tasks)) issues.push("intent.tasks must be an array");
   if (!Array.isArray(payload.nodeIntents)) issues.push("intent.nodeIntents must be an array");
+  if (
+    payload.mode !== undefined &&
+    payload.mode !== "architecture" &&
+    payload.mode !== "code"
+  ) {
+    issues.push("intent.mode must be architecture or code");
+  }
+  if (payload.resolves !== undefined) {
+    if (!Array.isArray(payload.resolves)) {
+      issues.push("intent.resolves must be an array");
+    } else if (!payload.resolves.every((id) => isUlid(id))) {
+      issues.push("intent.resolves must contain version ULIDs");
+    }
+  }
   return issues;
 }
 

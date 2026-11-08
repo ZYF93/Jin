@@ -1,15 +1,17 @@
 import { useEffect } from "react";
-import { AlertTriangle, RotateCcw } from "lucide-react";
+import { AlertTriangle, FolderOpen, RotateCcw, Sparkles, X } from "lucide-react";
 import { ArchitectureCanvas } from "./components/ArchitectureCanvas";
 import { ChatPanel } from "./components/ChatPanel";
+import { CommandPalette } from "./components/CommandPalette";
 import { LeftPanel } from "./components/LeftPanel";
 import { ReviewBar } from "./components/ReviewBar";
 import { ReviewDialog } from "./components/ReviewDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TopBar } from "./components/TopBar";
-import { LoadingScreen, ToastStack } from "./components/ui";
+import { BrandMark, LoadingScreen, ToastStack } from "./components/ui";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useJin } from "./state/useJin";
+import { useT } from "./lib/i18n";
 
 function Workspace() {
   return (
@@ -29,22 +31,64 @@ function Workspace() {
   );
 }
 
+function DemoWorkspace() {
+  const t = useT();
+  const openProject = useJin((state) => state.openProject);
+  const busy = useJin((state) => state.busy);
+  const setDemoGraph = useJin((state) => state.setDemoGraph);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <header className="flex shrink-0 items-center gap-3 border-b border-[var(--border)] px-4 py-2.5">
+        <BrandMark size={24} />
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[12px] font-bold">
+            {t("demo.title")}
+            <span className="chip chip-accent h-[18px] px-1.5 text-[8px]">
+              <Sparkles size={9} />
+              {t("graph.demoDiff")}
+            </span>
+          </div>
+          <div className="font-mono-ui truncate text-[9px] text-[var(--faint)]">
+            {t("demo.subtitle")}
+          </div>
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <button
+            className="btn h-8 text-[10px]"
+            disabled={Boolean(busy)}
+            onClick={() => void openProject()}
+          >
+            <FolderOpen size={12} />
+            {t("demo.openProject")}
+          </button>
+          <button className="btn btn-primary h-8 text-[10px]" onClick={() => setDemoGraph(false)}>
+            <X size={12} />
+            {t("demo.exit")}
+          </button>
+        </div>
+      </header>
+      <div className="relative min-h-0 flex-1 overflow-hidden">
+        <ArchitectureCanvas />
+      </div>
+    </div>
+  );
+}
+
 function StartupError({ message }: { message: string }) {
+  const t = useT();
   return (
     <div className="flex h-full items-center justify-center p-6">
       <div className="glass max-w-[480px] rounded-2xl p-5">
         <div className="flex items-center gap-2 text-[var(--danger)]">
           <AlertTriangle size={17} />
-          <span className="text-[13px] font-bold">Jin could not start</span>
+          <span className="text-[13px] font-bold">{t("startup.failed")}</span>
         </div>
         <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{message}</p>
-        <p className="mt-2 text-[10px] leading-relaxed text-[var(--faint)]">
-          Start the desktop app with <span className="font-mono-ui">pnpm dev</span>. The
-          renderer needs the preload bridge exposed by Electron.
-        </p>
+        <p className="mt-2 text-[10px] leading-relaxed text-[var(--faint)]">{t("startup.hint")}</p>
         <button className="btn mt-4" onClick={() => window.location.reload()}>
           <RotateCcw size={13} />
-          Reload
+          {t("startup.reload")}
         </button>
       </div>
     </div>
@@ -52,9 +96,11 @@ function StartupError({ message }: { message: string }) {
 }
 
 export default function App() {
+  const t = useT();
   const ready = useJin((state) => state.ready);
   const startupError = useJin((state) => state.startupError);
   const app = useJin((state) => state.app);
+  const demoGraph = useJin((state) => state.demoGraph);
   const initialize = useJin((state) => state.initialize);
   const setIntentsCollapsed = useJin((state) => state.setIntentsCollapsed);
 
@@ -92,11 +138,13 @@ export default function App() {
   return (
     <>
       {!ready ? (
-        <LoadingScreen message="Opening the architecture ledger…" />
+        <LoadingScreen message={t("startup.openingLedger")} />
       ) : startupError ? (
         <StartupError message={startupError} />
       ) : !app ? (
-        <LoadingScreen message="Reading project state…" />
+        <LoadingScreen message={t("startup.readingState")} />
+      ) : demoGraph ? (
+        <DemoWorkspace />
       ) : app.project ? (
         <Workspace />
       ) : (
@@ -104,6 +152,7 @@ export default function App() {
       )}
       <SettingsDialog />
       <ReviewDialog />
+      <CommandPalette />
       <ToastStack />
     </>
   );

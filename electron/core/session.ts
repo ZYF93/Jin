@@ -10,35 +10,46 @@ import {
   writeFileSync,
   type FSWatcher,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import type { ArchDiff, RiskHint } from "../../shared/arch/diff";
+import { hasFailedDrift, latestImplementation } from "../../shared/arch/conformance";
+import { translate, type MessageKey, type TranslationParams } from "../../shared/i18n";
+import { isProviderConfigured } from "../../shared/provider";
 import type {
   ArchNode,
   ArchOp,
   ArchSnapshot,
   Actor,
   Decision,
+  ImplementationCheck,
   ImplementationRecord,
   Intent,
   IntentTask,
   Touch,
+  VersionState,
   WalConflict,
 } from "../../shared/arch/types";
 import type {
   AgentStatus,
   AppState,
   ChatMessage,
+  ChatStream,
+  ContextUsage,
   FileContent,
   FileNode,
   JinEvent,
   LspStatus,
   ProjectInfo,
   ProposalView,
+  ReuseCandidate,
   ReusePlan,
   ScanStatus,
   ToolsInfo,
+  VersionReplay,
   WalInfo,
 } from "../../shared/ipc";
+import { commitFileTransaction, type StagedFileEdit } from "./agent/file-transaction";
 import type { WalRecord } from "../../shared/wal/types";
 import {
   applyIntent,
@@ -55,19 +66,24 @@ import { openJinIndex, type JinIndex } from "./db/jin-index";
 import { buildFileTree, readProjectFile, resolveProjectFile } from "./files/tree";
 import { ulid } from "./ids/ulid";
 import { detectLanguageServers } from "./lsp/registry";
-import { localPlan } from "./agent/local-planner";
+import { collectLspFacts } from "./lsp/facts";
+import { LspMarketplace } from "./lsp/marketplace";
+import { LspStore } from "./lsp/store";
+import type { LspFacts } from "./lsp/client";
 import { planWithProvider } from "./agent/llm-planner";
 import { normalizePlan } from "./agent/normalize-plan";
 import type { PlanDraft } from "./agent/plan-types";
-import { completeJson, type ProviderConfig } from "./agent/provider";
 import {
-  readConfig,
-  walPath,
-  cachePath,
-  type JinConfig,
-} from "./project/config";
-import { loadWal, appendRecord } from "./wal/io";
+  completeJson,
+  ProviderError,
+  type ProviderConfig,
+  type ProviderTokenUsage,
+} from "./agent/provider";
+import { readConfig, walPath, cachePath, type JinConfig } from "./project/config";
+import { loadWal, appendRecord, appendRecords } from "./wal/io";
 import { foldWal } from "./wal/fold";
+import { replayVersion as replayWalVersion } from "./wal/replay";
+import { FATAL_WAL_CONFLICTS, planMerge } from "./wal/merge-intent";
 import { walHeads } from "./wal/heads";
 import {
   makeDecisionRecord,
@@ -78,16 +94,19 @@ import {
   type RecordBase,
 } from "./wal/record";
 import { HlcClock, formatHlc, parseHlc, type Hlc } from "./time/hlc";
-import { RagService } from "./rag/rag";
+import { RagService, RagStore } from "./rag/rag";
+import { evaluateReuse } from "./rag/reuse-guard";
+import { UsageLedger, type UsageSource } from "./metrics/usage";
+import { computeProjectMetrics } from "./metrics/metrics";
+import { normalizeProjectPath, runEkoCoder } from "./agent/eko-runtime";
+import { applyUnifiedPatchFile, parseUnifiedPatch } from "./agent/patch";
 import { SkillManager } from "./skills/manager";
 import { McpManager } from "./mcp/manager";
-import { diffScanToOps } from "./scan/import";
-import { scanProject, type ScanResult } from "./scan/scanner";
-import {
-  gitState,
-  runProjectChecks,
-  verifyArchitecture,
-} from "./verify/verify";
+import { diffScanToOps, scanNodeIntents } from "./scan/import";
+import { scanProject, listSourceFiles, type ScanResult } from "./scan/scanner";
+import { readScanManifest, writeScanManifest } from "./scan/manifest";
+import { runSemanticPass } from "./scan/semantic";
+import { gitState, runProjectChecks, verifyArchitecture } from "./verify/verify";
 import { installMergeDriver, mergeInstructions } from "./git/merge-driver";
 import type { SettingsStore } from "./settings/app-settings";
 
@@ -99,6 +118,8 @@ export interface SessionDeps {
   settings: SettingsStore;
   recentProjects: () => import("../../shared/ipc").RecentProject[];
   emit: (event: JinEvent) => void;
+  /** Shared app-level VS Code Marketplace store, when available. */
+  marketplace?: LspMarketplace;
 }
 
 interface InternalProposal {
@@ -117,6 +138,8 @@ interface InternalProposal {
   createdAt: string;
   status: "in_review" | "stale" | "approved" | "rejected";
   opRecordIds?: string[];
+  /** Scan syncs and amendments change architecture only; no code turn follows approval. */
+  architectureOnly?: boolean;
 }
 
 function nowIso(): string {
@@ -127,16 +150,63 @@ function unique<T>(items: readonly T[]): T[] {
   return [...new Set(items)];
 }
 
+/**
+ * Pull a human-readable JSON string field out of a partially streamed JSON
+ * document. Planner models emit `message` (or `goal`) before the ops array, so
+ * the chat can show meaningful prose while the rest of the object is arriving.
+ */
+export function streamingPreview(raw: string, fields: readonly string[]): string {
+  for (const field of fields) {
+    const match = new RegExp(`"${field}"\\s*:\\s*"`).exec(raw);
+    if (!match) continue;
+    let index = match.index + match[0].length;
+    let text = "";
+    while (index < raw.length) {
+      const char = raw[index] as string;
+      if (char === '"') break;
+      if (char !== "\\") {
+        text += char;
+        index += 1;
+        continue;
+      }
+      const escape = raw[index + 1];
+      if (escape === undefined) break;
+      const simple: Record<string, string> = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        b: "\b",
+        f: "\f",
+        n: "\n",
+        r: "\r",
+        t: "\t",
+      };
+      if (escape in simple) {
+        text += simple[escape];
+        index += 2;
+        continue;
+      }
+      if (escape === "u") {
+        const hex = raw.slice(index + 2, index + 6);
+        if (hex.length < 4) break;
+        text += String.fromCharCode(Number.parseInt(hex, 16) || 0);
+        index += 6;
+        continue;
+      }
+      text += escape;
+      index += 2;
+    }
+    if (text.trim()) return text;
+  }
+  return "";
+}
+
 function latestHlc(records: readonly WalRecord[]): Hlc | null {
   let best: Hlc | null = null;
   for (const record of records) {
     try {
       const hlc = parseHlc(record.hlc);
-      if (
-        !best ||
-        hlc.wall > best.wall ||
-        (hlc.wall === best.wall && hlc.counter > best.counter)
-      ) {
+      if (!best || hlc.wall > best.wall || (hlc.wall === best.wall && hlc.counter > best.counter)) {
         best = hlc;
       }
     } catch {
@@ -146,14 +216,14 @@ function latestHlc(records: readonly WalRecord[]): Hlc | null {
   return best;
 }
 
-function emptyScanStatus(): ScanStatus {
+function emptyScanStatus(message: string): ScanStatus {
   return {
     phase: "idle",
     files: 0,
     symbols: 0,
     nodes: 0,
     edges: 0,
-    message: "No scan yet.",
+    message,
     updatedAt: null,
   };
 }
@@ -168,8 +238,8 @@ function isChatMessage(value: unknown): value is ChatMessage {
   );
 }
 
-function emptyAgentStatus(): AgentStatus {
-  return { phase: "idle", message: "Ready." };
+function emptyAgentStatus(message: string): AgentStatus {
+  return { phase: "idle", message };
 }
 
 export class ProjectSession {
@@ -183,28 +253,52 @@ export class ProjectSession {
   private warnings: string[] = [];
   private proposal: InternalProposal | null = null;
   private messages: ChatMessage[] = [];
-  private scanStatus: ScanStatus = emptyScanStatus();
+  private scanStatus: ScanStatus;
   private lsp: LspStatus[] = [];
+  private readonly lspStore: LspStore;
+  private lastLspFacts: LspFacts | null = null;
   private scanResult: ScanResult | null = null;
-  private rag = new RagService();
+  private rag: RagService;
   private readonly skills: SkillManager;
   private readonly mcp: McpManager;
+  private readonly marketplace: LspMarketplace;
+  private readonly usage: UsageLedger;
   private tools: ToolsInfo;
-  private agentStatus: AgentStatus = emptyAgentStatus();
+  private agentStatus: AgentStatus;
+  private lastContext: ContextUsage = {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    model: "",
+    updatedAt: null,
+  };
   private clock: HlcClock;
   private actor: Actor;
   private watcher: FSWatcher | null = null;
+  private sourceWatchers: FSWatcher[] = [];
   private refreshTimer: NodeJS.Timeout | null = null;
+  private sourceTimer: NodeJS.Timeout | null = null;
+  private factsRefresh: Promise<void> | null = null;
   private abortController: AbortController | null = null;
+  private stream: ChatStream | null = null;
+  private streamTimer: NodeJS.Timeout | null = null;
+  private readonly streamId = ulid();
   private closed = false;
   private branch: string | null = null;
+  /** Record ids this process just appended; a watcher echo must not look like a pull. */
+  private readonly localWrites = new Set<string>();
 
   constructor(root: string, deps: SessionDeps) {
     this.root = resolve(root);
     this.deps = deps;
+    this.scanStatus = this.emptyScanStatus();
+    this.agentStatus = this.emptyAgentStatus();
     this.config = readConfig(this.root);
     this.skills = new SkillManager(this.root);
     this.mcp = new McpManager(this.root);
+    this.marketplace =
+      deps.marketplace ?? new LspMarketplace(join(homedir(), ".config", "jin", "lsp-extensions"));
+    this.usage = new UsageLedger(this.root);
     this.actor = this.currentActor();
     const initialHlc = latestHlc([]);
     this.clock = new HlcClock(this.actor.id, initialHlc ?? undefined);
@@ -228,10 +322,36 @@ export class ProjectSession {
     };
     this.branch = this.readGitBranch();
     this.index = openJinIndex(this.root);
+    this.rag = new RagService(new RagStore(this.index.db));
+    this.lspStore = new LspStore(this.index.db);
     this.loadWalIntoState();
     this.messages = this.loadChat();
-    this.lsp = detectLanguageServers();
+    this.lsp = detectLanguageServers([], this.marketplace.specs());
     this.startWatcher();
+  }
+
+  private t(key: MessageKey, params?: TranslationParams): string {
+    return translate(this.deps.settings.get().language, key, params);
+  }
+
+  private errorMessage(error: unknown): string {
+    if (error instanceof ProviderError && error.status === 429) {
+      return this.t("error.providerRateLimit");
+    }
+    if (error instanceof ProviderError && error.retryAfterSeconds !== undefined) {
+      return this.t("error.providerCircuitOpen", {
+        seconds: error.retryAfterSeconds,
+      });
+    }
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private emptyScanStatus(): ScanStatus {
+    return emptyScanStatus(this.t("scan.idle"));
+  }
+
+  private emptyAgentStatus(): AgentStatus {
+    return emptyAgentStatus(this.t("scan.ready"));
   }
 
   async initialize(): Promise<void> {
@@ -240,7 +360,7 @@ export class ProjectSession {
         this.addMessage(
           "system",
           "text",
-          `Opened ${this.config.project.name}. The WAL is empty; scanning the repository to create the first import proposal.`,
+          this.t("session.openedEmpty", { name: this.config.project.name }),
         );
       }
       try {
@@ -249,7 +369,9 @@ export class ProjectSession {
         this.addMessage(
           "assistant",
           "error",
-          `Initial scan failed: ${error instanceof Error ? error.message : String(error)}`,
+          this.t("session.initialScanFailed", {
+            message: error instanceof Error ? error.message : String(error),
+          }),
         );
       }
     } else {
@@ -257,10 +379,18 @@ export class ProjectSession {
         this.addMessage(
           "system",
           "text",
-          `Opened ${this.config.project.name}. Loaded ${this.records.length} WAL records and ${Object.keys(this.snapshot.nodes).length} architecture nodes.`,
+          this.t("session.openedLoaded", {
+            name: this.config.project.name,
+            records: this.records.length,
+            nodes: Object.keys(this.snapshot.nodes).length,
+          }),
         );
       }
-      this.scanStatus = { ...this.scanStatus, phase: "scanning", message: "Refreshing source facts…" };
+      this.scanStatus = {
+        ...this.scanStatus,
+        phase: "scanning",
+        message: this.t("scan.refreshing"),
+      };
       void this.refreshFacts().catch((error: unknown) => {
         this.scanStatus = {
           ...this.scanStatus,
@@ -278,8 +408,24 @@ export class ProjectSession {
     return {
       id: identity.actorId,
       kind: "user",
-      name: identity.name || "Jin user",
+      name: identity.name || this.t("common.jinUser"),
       ...(identity.email ? { email: identity.email } : {}),
+    };
+  }
+
+  /** Record provider tokens against the prices configured at call time. */
+  private recordUsage(source: UsageSource, model: string, usage: ProviderTokenUsage): void {
+    const provider = this.deps.settings.get().provider;
+    this.usage.record(source, model, usage, {
+      inputPerMillion: provider.inputPricePerMillion ?? 0,
+      outputPerMillion: provider.outputPricePerMillion ?? 0,
+    });
+    this.lastContext = {
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      totalTokens: usage.promptTokens + usage.completionTokens,
+      model,
+      updatedAt: nowIso(),
     };
   }
 
@@ -298,8 +444,14 @@ export class ProjectSession {
   private loadWalIntoState(): void {
     const loaded = loadWal(walPath(this.root));
     if (loaded.errors.length > 0) {
-      this.warnings = loaded.errors.map((error) => `WAL line ${error.line}: ${error.message}`);
-      this.scanStatus = { ...this.scanStatus, phase: "failed", message: "WAL has parse errors" };
+      this.warnings = loaded.errors.map((error) =>
+        this.t("scan.walLine", { line: error.line, message: error.message }),
+      );
+      this.scanStatus = {
+        ...this.scanStatus,
+        phase: "failed",
+        message: this.t("scan.walParseErrors"),
+      };
       return;
     }
     const folded = foldWal(loaded.records);
@@ -314,15 +466,21 @@ export class ProjectSession {
     } catch (error) {
       this.warnings = [
         ...this.warnings,
-        `SQLite index could not be rebuilt: ${error instanceof Error ? error.message : String(error)}`,
+        this.t("scan.indexRebuild", {
+          message: error instanceof Error ? error.message : String(error),
+        }),
       ];
     }
   }
 
-  private refreshFromWal(): boolean {
+  private refreshFromWal(announce = false): boolean {
+    const previous = this.records;
+    const previousIds = new Set(previous.map((record) => record.id));
     const loaded = loadWal(walPath(this.root));
     if (loaded.errors.length > 0) {
-      this.warnings = loaded.errors.map((error) => `WAL line ${error.line}: ${error.message}`);
+      this.warnings = loaded.errors.map((error) =>
+        this.t("scan.walLine", { line: error.line, message: error.message }),
+      );
       this.emitState();
       return false;
     }
@@ -338,7 +496,9 @@ export class ProjectSession {
     } catch (error) {
       this.warnings = [
         ...this.warnings,
-        `SQLite index could not be rebuilt: ${error instanceof Error ? error.message : String(error)}`,
+        this.t("scan.indexRebuild", {
+          message: error instanceof Error ? error.message : String(error),
+        }),
       ];
     }
     if (
@@ -347,6 +507,38 @@ export class ProjectSession {
     ) {
       this.proposal.status = "stale";
     }
+    if (announce && previous.length > 0 && !this.closed) {
+      const incoming = loaded.records.filter(
+        (record) => !previousIds.has(record.id) && !this.localWrites.has(record.id),
+      );
+      if (incoming.length > 0) {
+        const versionIds = [...new Set(incoming.map((record) => record.versionId))];
+        const labels = versionIds.slice(0, 6).map((versionId) => {
+          const version = this.snapshot.versions[versionId];
+          if (!version) return versionId.slice(0, 8);
+          return `v${version.ordinal ?? "?"} ${this.t(`status.${version.status}` as MessageKey)}`;
+        });
+        const more =
+          versionIds.length > labels.length
+            ? this.t("session.pulledMore", { count: versionIds.length - labels.length })
+            : "";
+        const open = this.openConflicts();
+        const conflictText =
+          open.length > 0
+            ? this.t("session.pulledConflicts", { count: open.length })
+            : this.t("session.pulledReplay");
+        this.addMessage(
+          "system",
+          "scan",
+          this.t(incoming.length === 1 ? "session.pulled" : "session.pulledPlural", {
+            records: incoming.length,
+            labels: labels.join(", ") + more,
+            conflictText,
+          }),
+        );
+      }
+    }
+    this.localWrites.clear();
     return true;
   }
 
@@ -363,12 +555,75 @@ export class ProjectSession {
             this.emitState();
             return;
           }
-          if (this.refreshFromWal()) this.emitState();
+          if (this.refreshFromWal(true)) this.emitState();
         }, 180);
       });
     } catch {
       this.watcher = null;
     }
+    this.startSourceWatcher();
+  }
+
+  /**
+   * Watch source roots so LSP facts and the reuse index stay warm between
+   * explicit scans. This never writes a WAL proposal by itself; architecture
+   * changes still require an Intent and one approval.
+   */
+  private startSourceWatcher(): void {
+    for (const scanRoot of this.config.scan.roots) {
+      const absolute = resolve(this.root, scanRoot);
+      if (!existsSync(absolute)) continue;
+      try {
+        const watcher = watch(
+          absolute,
+          { recursive: true, persistent: false },
+          (_event, filename) => {
+            const name = String(filename ?? "");
+            if (!name) return;
+            const parts = name.split(/[\\/]/);
+            if (
+              parts.some((part) =>
+                [".git", ".jin", "node_modules", "dist", "dist-electron", "release"].includes(part),
+              )
+            ) {
+              return;
+            }
+            this.queueFactsRefresh();
+          },
+        );
+        this.sourceWatchers.push(watcher);
+      } catch {
+        // Recursive watch is platform-dependent; explicit Scan still works.
+      }
+    }
+  }
+
+  private queueFactsRefresh(): void {
+    if (this.sourceTimer) clearTimeout(this.sourceTimer);
+    this.sourceTimer = setTimeout(() => {
+      this.sourceTimer = null;
+      if (this.closed || this.factsRefresh) return;
+      if (
+        this.agentStatus.phase === "planning" ||
+        this.agentStatus.phase === "implementing" ||
+        this.agentStatus.phase === "verifying"
+      ) {
+        return;
+      }
+      this.factsRefresh = this.refreshFacts()
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          this.scanStatus = {
+            ...this.scanStatus,
+            phase: "failed",
+            message: error instanceof Error ? error.message : String(error),
+          };
+          this.emitState();
+        })
+        .finally(() => {
+          this.factsRefresh = null;
+        });
+    }, 500);
   }
 
   private chatPath(): string {
@@ -424,13 +679,61 @@ export class ProjectSession {
     this.deps.emit({ type: "state", state: this.getState() });
   }
 
+  private startStream(label: string, versionId?: string): void {
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
+    this.stream = {
+      id: this.streamId,
+      label,
+      content: "",
+      phase: "thinking",
+      createdAt: nowIso(),
+      ...(versionId ? { versionId } : {}),
+    };
+    this.emitStream();
+  }
+
+  /** Replace the transient stream text. Provider deltas are accumulated by callers. */
+  private updateStream(
+    content: string,
+    options: { label?: string; phase?: ChatStream["phase"] } = {},
+  ): void {
+    if (!this.stream) return;
+    this.stream = {
+      ...this.stream,
+      content: content.length > 12_000 ? content.slice(-12_000) : content,
+      label: options.label ?? this.stream.label,
+      phase: options.phase ?? this.stream.phase,
+    };
+    if (!this.streamTimer) {
+      this.streamTimer = setTimeout(() => {
+        this.streamTimer = null;
+        this.emitStream();
+      }, 45);
+      this.streamTimer.unref?.();
+    }
+  }
+
+  private emitStream(): void {
+    this.deps.emit({ type: "stream", stream: this.stream });
+  }
+
+  private finishStream(): void {
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
+    if (!this.stream) return;
+    this.stream = null;
+    this.emitStream();
+  }
+
   private proposalStatus(): ProposalView["status"] {
     const proposal = this.proposal;
     if (!proposal) return "approved";
-    if (
-      proposal.status === "in_review" &&
-      hashSnapshot(this.snapshot) !== proposal.baseHash
-    ) {
+    if (proposal.status === "in_review" && hashSnapshot(this.snapshot) !== proposal.baseHash) {
       proposal.status = "stale";
     }
     return proposal.status;
@@ -453,30 +756,129 @@ export class ProjectSession {
       reusePlan: this.proposal.reusePlan,
       createdAt: this.proposal.createdAt,
       status: this.proposalStatus(),
+      architectureOnly: Boolean(
+        this.proposal.architectureOnly || this.proposal.intent.mode === "architecture",
+      ),
     };
   }
 
-  private scanStatusSummary(scan: ScanResult): string {
+  private scanStatusSummary(scan: ScanResult, lspFacts: LspFacts | null = null): string {
     const warnings = scan.warnings.slice(0, 3).join(" ");
-    return warnings
-      ? `${scan.stats.files} files, ${scan.stats.nodes} nodes. ${warnings}`
-      : `${scan.stats.files} files, ${scan.stats.symbols} symbols, ${scan.stats.nodes} nodes.`;
+    const base = warnings
+      ? this.t("scan.summaryWarnings", {
+          files: scan.stats.files,
+          nodes: scan.stats.nodes,
+          warnings,
+        })
+      : this.t("scan.summary", {
+          files: scan.stats.files,
+          symbols: scan.stats.symbols,
+          nodes: scan.stats.nodes,
+        });
+    if (!lspFacts || lspFacts.servers.length === 0) return base;
+    const lsp = lspFacts.servers
+      .map((server) =>
+        server.error
+          ? this.t("scan.lspServerError", { id: server.id, error: server.error })
+          : this.t("scan.lspServer", {
+              id: server.id,
+              symbols: server.symbols,
+              diagnostics: server.diagnostics,
+            }),
+      )
+      .join("; ");
+    return this.t("scan.lsp", { base, servers: lsp });
   }
 
   private async refreshFacts(signal?: AbortSignal): Promise<ScanResult> {
-    this.scanStatus = { ...this.scanStatus, phase: "scanning", message: "Scanning source facts…" };
+    this.scanStatus = {
+      ...this.scanStatus,
+      phase: "scanning",
+      message: this.t("scan.scanning"),
+    };
     this.emitState();
-    const scan = scanProject(this.root, this.config, { signal });
+    const listing = listSourceFiles(this.root, this.config, { signal });
+    const specs = this.marketplace.specs();
+    this.lsp = detectLanguageServers(listing.files, specs);
+    let lspFacts: LspFacts | null = null;
+    if (!signal?.aborted && this.lsp.some((status) => status.status === "available")) {
+      try {
+        lspFacts = await collectLspFacts(this.root, listing.files, this.lsp, {
+          signal,
+          maxFilesPerServer: 60,
+          timeoutMs: 9000,
+          specs,
+        });
+      } catch (error) {
+        lspFacts = {
+          symbols: [],
+          diagnostics: [],
+          servers: [],
+          collectedAt: new Date().toISOString(),
+        };
+        this.scanStatus = {
+          ...this.scanStatus,
+          message: this.t("scan.lspUnavailable", {
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        };
+      }
+    }
+    this.lastLspFacts = lspFacts;
+    const lspByPath = new Map<
+      string,
+      Array<{
+        name: string;
+        kind: "method" | "field" | "property";
+        line?: number;
+        character?: number;
+      }>
+    >();
+    for (const symbol of lspFacts?.symbols ?? []) {
+      const list = lspByPath.get(symbol.path);
+      const fact = {
+        name: symbol.name,
+        kind: symbol.kind,
+        line: symbol.line,
+        character: symbol.character,
+      };
+      if (list) list.push(fact);
+      else lspByPath.set(symbol.path, [fact]);
+    }
+    const scan = scanProject(this.root, this.config, {
+      signal,
+      lspFacts: lspByPath,
+      manifest: readScanManifest(cachePath(this.root)),
+    });
     this.scanResult = scan;
     this.rag.update(this.root, scan, this.snapshot);
-    this.lsp = detectLanguageServers(scan.files.map((file) => file.path));
+    try {
+      writeScanManifest(cachePath(this.root), scan.manifest);
+    } catch (error) {
+      scan.warnings.push(
+        this.t("scan.manifestWrite", {
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+    if (lspFacts) {
+      try {
+        this.lspStore.replaceAll(lspFacts);
+      } catch (error) {
+        scan.warnings.push(
+          this.t("scan.lspCacheWrite", {
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    }
     this.scanStatus = {
       phase: "ready",
       files: scan.stats.files,
       symbols: scan.stats.symbols,
       nodes: scan.stats.nodes,
       edges: scan.stats.edges,
-      message: this.scanStatusSummary(scan),
+      message: this.scanStatusSummary(scan, lspFacts),
       updatedAt: scan.scannedAt,
     };
     this.emitState();
@@ -506,12 +908,18 @@ export class ProjectSession {
     const base = cloneSnapshot(this.snapshot);
     const preview = previewOps(base, ops, intent.versionId);
     if (preview.conflicts.length > 0) {
-      throw new Error(`Proposal has conflicts: ${preview.conflicts.join("; ")}`);
+      throw new Error(
+        this.t("error.proposalConflicts", { conflicts: preview.conflicts.join("; ") }),
+      );
     }
     const target = preview.snapshot;
     const intentConflicts = applyIntent(target, intent);
     if (intentConflicts.length > 0) {
-      throw new Error(`Intent targets missing nodes: ${intentConflicts.map((item) => item.message).join("; ")}`);
+      throw new Error(
+        this.t("error.intentTargetsMissing", {
+          conflicts: intentConflicts.map((item) => item.message).join("; "),
+        }),
+      );
     }
     for (const touch of touches) {
       const conflict = applyTouch(target, touch);
@@ -541,7 +949,11 @@ export class ProjectSession {
     };
   }
 
-  private makeIntent(plan: PlanDraft, versionId: string, nodeIntents: Intent["nodeIntents"]): Intent {
+  private makeIntent(
+    plan: PlanDraft,
+    versionId: string,
+    nodeIntents: Intent["nodeIntents"],
+  ): Intent {
     const tasks: IntentTask[] = plan.tasks.length
       ? plan.tasks.map((task) => ({
           id: ulid(),
@@ -556,7 +968,7 @@ export class ProjectSession {
             title: plan.title,
             status: "pending",
             dependsOn: [],
-            acceptance: ["The implementation matches the approved intent and architecture"],
+            acceptance: [this.t("session.taskAcceptance")],
           },
         ];
     return {
@@ -589,7 +1001,7 @@ export class ProjectSession {
       const target = this.snapshot.nodes[targetId];
       if (!target) continue;
       const nodeId = nodeIntent.facetId
-        ? this.snapshot.nodes[nodeIntent.facetId]?.parentId ?? nodeIntent.nodeId
+        ? (this.snapshot.nodes[nodeIntent.facetId]?.parentId ?? nodeIntent.nodeId)
         : nodeIntent.nodeId;
       if (!this.snapshot.nodes[nodeId]) continue;
       seen.add(targetId);
@@ -609,50 +1021,149 @@ export class ProjectSession {
     return touches;
   }
 
+  private languageCheck(): ImplementationCheck | null {
+    const facts = this.lastLspFacts;
+    if (!facts || facts.servers.length === 0) return null;
+    const name = this.t("session.languageDiagnostics");
+    const failed = facts.servers.filter((server) => server.error);
+    if (failed.length === facts.servers.length) {
+      return {
+        name,
+        status: "skip",
+        detail: failed.map((server) => `${server.id}: ${server.error ?? "unavailable"}`).join("; "),
+      };
+    }
+    const errors = facts.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+    if (errors.length > 0) {
+      return {
+        name,
+        status: "fail",
+        detail: this.t("session.diagnosticsErrors", {
+          count: errors.length,
+          details: errors
+            .slice(0, 4)
+            .map((diagnostic) => `${diagnostic.path}:${diagnostic.line} ${diagnostic.message}`)
+            .join("; "),
+        }),
+      };
+    }
+    const totals = facts.servers
+      .filter((server) => !server.error)
+      .map((server) => `${server.id}: ${server.symbols} symbols`)
+      .join("; ");
+    return {
+      name,
+      status: "pass",
+      detail: totals || this.t("session.noDiagnosticErrors"),
+    };
+  }
+
   private async ensureScan(signal?: AbortSignal): Promise<ScanResult> {
     if (this.scanResult) return this.scanResult;
     return this.refreshFacts(signal);
+  }
+
+  /**
+   * A drift amendment is only meaningful for a version whose latest
+   * implementation actually failed the drift check. Test/lint failures and op
+   * conformance failures are fixed in code, not by editing architecture.
+   */
+  private requireAmendmentTarget(versionId: string): {
+    version: VersionState;
+    implementation: ImplementationRecord;
+    intent: Intent;
+  } {
+    const version = this.snapshot.versions[versionId];
+    if (!version) throw new Error(this.t("error.unknownVersion", { id: versionId }));
+    if (version.status !== "implemented") {
+      throw new Error(this.t("error.amendOnlyImplemented"));
+    }
+    const implementation = latestImplementation(this.snapshot, version);
+    if (!implementation || !hasFailedDrift(implementation)) {
+      throw new Error(this.t("error.noDriftToAmend"));
+    }
+    const intent = this.snapshot.intents[version.intentId];
+    if (!intent) throw new Error(this.t("error.versionNoIntent"));
+    return { version, implementation, intent };
   }
 
   async sendMessage(text: string): Promise<AppState> {
     const request = text.trim();
     if (!request) return this.getState();
     if (this.proposal?.status === "in_review") {
-      throw new Error("Approve or reject the current proposal before starting another turn.");
+      throw new Error(this.t("error.approveOrRejectFirst"));
     }
-    if (this.agentStatus.phase === "planning" || this.agentStatus.phase === "implementing" || this.agentStatus.phase === "verifying") {
-      throw new Error("The agent is already working. Wait or cancel the current run.");
+    if (
+      this.agentStatus.phase === "planning" ||
+      this.agentStatus.phase === "implementing" ||
+      this.agentStatus.phase === "verifying"
+    ) {
+      throw new Error(this.t("error.agentWorking"));
     }
+    const provider = this.deps.settings.providerConfig();
+    if (!isProviderConfigured(provider)) {
+      throw new Error(this.t("error.providerRequired"));
+    }
+    const history = this.messages
+      .slice(-12)
+      .filter((message) => message.kind === "text" || message.kind === "proposal")
+      .map((message) => ({
+        role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+        content: message.content.slice(0, 6000),
+      }));
     this.addMessage("user", "text", request);
-    this.agentStatus = { phase: "planning", message: "Planning the turn…" };
+    this.agentStatus = { phase: "planning", message: this.t("session.planning") };
     this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
     try {
       await this.ensureScan(signal);
       const reusePlan = this.rag.plan(request);
-      const provider = this.deps.settings.providerConfig();
-      const configured =
-        provider.kind === "ollama" ||
-        (provider.kind === "openai-compatible" && Boolean(provider.apiKey));
       let plan: PlanDraft;
-      let plannerWarning = "";
-      if (configured) {
-        try {
-          plan = await planWithProvider(provider as ProviderConfig, request, {
-            snapshot: this.snapshot,
-            skills: this.skills.promptFor(request),
-            reuseSummary: reusePlan.summary + "\n" + reusePlan.candidates
+      this.startStream(this.t("chat.streamPlanning"));
+      let raw = "";
+      try {
+        plan = await planWithProvider(provider as ProviderConfig, request, {
+          snapshot: this.snapshot,
+          skills: this.skills.promptFor(request),
+          reuseSummary:
+            reusePlan.summary +
+            "\n" +
+            reusePlan.candidates
               .slice(0, 5)
               .map((candidate) => `- ${candidate.path}: ${candidate.reason}`)
               .join("\n"),
-          });
-        } catch (error) {
-          plannerWarning = `AI planner unavailable (${error instanceof Error ? error.message : String(error)}). Used the local planner instead.`;
-          plan = localPlan(this.snapshot, request);
+          history,
+          signal,
+          onUsage: (usage) => this.recordUsage("plan", provider.model, usage),
+          onDelta: (delta) => {
+            if (signal.aborted) return;
+            raw += delta;
+            const preview = streamingPreview(raw, ["message", "goal"]);
+            if (preview) {
+              this.updateStream(preview, {
+                label: this.t("chat.streamPlanning"),
+                phase: "responding",
+              });
+            }
+          },
+        });
+      } catch (error) {
+        if (signal.aborted) {
+          // Cancelling a turn must not fabricate a fallback proposal.
+          this.finishStream();
+          this.agentStatus = this.emptyAgentStatus();
+          this.emitState();
+          return this.getState();
         }
-      } else {
-        plan = localPlan(this.snapshot, request);
+        throw error;
+      }
+      if (plan.kind === "chat") {
+        this.finishStream();
+        this.addMessage("assistant", "text", plan.assistantMessage);
+        this.agentStatus = this.emptyAgentStatus();
+        this.emitState();
+        return this.getState();
       }
       const versionId = ulid();
       const normalized = normalizePlan(plan, this.snapshot, versionId);
@@ -660,64 +1171,141 @@ export class ProjectSession {
       const touches = this.touchesForIntent(normalized.nodeIntents, normalized.ops, intent);
       const proposal = this.makeProposal(intent, normalized.ops, touches, reusePlan);
       this.proposal = proposal;
+      this.finishStream();
       const notes = [...normalized.warnings];
-      if (plannerWarning) notes.push(plannerWarning);
       const reuseText =
         reusePlan.candidates.length > 0
-          ? `ReusePlan: ${reusePlan.candidates.slice(0, 3).map((candidate) => candidate.path).join(", ")}.`
-          : "ReusePlan: no close existing unit found; the implementation must justify new code.";
+          ? this.t("session.reuseFound", {
+              paths: reusePlan.candidates
+                .slice(0, 3)
+                .map((candidate) => candidate.path)
+                .join(", "),
+            })
+          : this.t("session.reuseNoMatch");
       this.addMessage(
         "assistant",
         "proposal",
-        `${plan.assistantMessage}\n\n${reuseText}${notes.length ? `\n\nNotes: ${notes.join(" ")}` : ""}`,
+        `${plan.assistantMessage}\n\n${reuseText}${notes.length ? `\n\n${this.t("session.notes", { notes: notes.join(" ") })}` : ""}`,
         { proposalId: proposal.id },
       );
-      this.agentStatus = emptyAgentStatus();
+      this.agentStatus = this.emptyAgentStatus();
       this.emitState();
       return this.getState();
     } catch (error) {
+      const message = this.errorMessage(error);
       this.agentStatus = {
         phase: "error",
-        message: error instanceof Error ? error.message : String(error),
+        message,
       };
       this.addMessage(
         "assistant",
         "error",
-        `I could not prepare a proposal: ${error instanceof Error ? error.message : String(error)}`,
+        this.t("session.proposalFailed", {
+          message,
+        }),
+        {
+          details: error instanceof ProviderError ? error.details : undefined,
+        },
       );
       this.emitState();
       return this.getState();
     } finally {
+      this.finishStream();
       this.abortController = null;
     }
   }
 
-  async scan(): Promise<AppState> {
+  async scan(options: { amendmentOf?: string } = {}): Promise<AppState> {
     if (this.proposal?.status === "in_review") {
-      throw new Error("Approve or reject the current proposal before rescanning.");
+      throw new Error(this.t("error.rescanBlocked"));
     }
-    this.scanStatus = { ...this.scanStatus, phase: "scanning", message: "Scanning source facts…" };
+    const amendment = options.amendmentOf ? this.requireAmendmentTarget(options.amendmentOf) : null;
+    this.scanStatus = {
+      ...this.scanStatus,
+      phase: "scanning",
+      message: this.t("scan.scanning"),
+    };
     this.emitState();
     this.abortController = new AbortController();
     try {
-      const scan = await this.refreshFacts(this.abortController.signal);
+      let scan = await this.refreshFacts(this.abortController.signal);
+      let semanticSummary = "";
+      const settings = this.deps.settings.get();
+      const provider = this.deps.settings.providerConfig();
+      const initialImport = !Object.values(this.snapshot.nodes).some((node) => node.level === "L1");
+      if ((settings.agent.semanticScan || initialImport) && isProviderConfigured(provider)) {
+        this.scanStatus = {
+          ...this.scanStatus,
+          message: this.t("scan.refining"),
+        };
+        this.emitState();
+        const semantic = await runSemanticPass(scan, provider as ProviderConfig, {
+          signal: this.abortController.signal,
+          temperature: settings.agent.temperature,
+          maxTokens: Math.min(settings.agent.maxTokens, 6000),
+          onUsage: (usage) => this.recordUsage("semantic", provider.model, usage),
+        });
+        scan = semantic.scan;
+        if (semantic.warnings.length > 0) scan.warnings.push(...semantic.warnings);
+        if (semantic.summary) {
+          semanticSummary = semantic.summary;
+          this.rag.update(this.root, scan, this.snapshot);
+        }
+        this.scanResult = scan;
+        this.scanStatus = {
+          ...this.scanStatus,
+          phase: "ready",
+          files: scan.stats.files,
+          symbols: scan.stats.symbols,
+          nodes: scan.stats.nodes,
+          edges: scan.stats.edges,
+          message: this.scanStatusSummary(scan),
+          updatedAt: scan.scannedAt,
+        };
+        this.emitState();
+      }
       const importResult = diffScanToOps(this.snapshot, scan);
       if (importResult.ops.length === 0) {
+        const summary = `${this.scanStatusSummary(scan)}${
+          semanticSummary ? ` ${semanticSummary}` : ""
+        }`;
         this.addMessage(
           "assistant",
           "scan",
-          `Architecture is in sync with source facts. ${this.scanStatusSummary(scan)}`,
+          amendment
+            ? this.t("session.noDrift", {
+                ordinal: `v${amendment.version.ordinal ?? "?"}`,
+                summary,
+              })
+            : this.t("session.inSync", { summary }),
         );
         this.scanStatus = { ...this.scanStatus, phase: "ready" };
         this.emitState();
         return this.getState();
       }
-      const empty = Object.keys(this.snapshot.nodes).length === 0;
+      const empty = initialImport;
       const versionId = ulid();
-      const title = empty ? "Import existing architecture" : "Sync architecture with source";
-      const goal = empty
-        ? `Import ${scan.stats.files} source files into a reviewable L0/L1 architecture. Review the module boundaries and responsibilities before approving.`
-        : `Bring the approved architecture in line with ${scan.stats.files} scanned source files. ${importResult.addedNodes} additions, ${importResult.updatedNodes} updates, ${importResult.removedNodes} removals.`;
+      const ordinal = amendment ? `v${amendment.version.ordinal ?? "?"}` : "";
+      const title = amendment
+        ? this.t("session.syncTitle.amendment", { ordinal })
+        : empty
+          ? this.t("session.syncTitle.import")
+          : this.t("session.syncTitle.sync");
+      const goal = amendment
+        ? this.t("session.syncGoal.amendment", {
+            title: amendment.intent.title,
+            added: importResult.addedNodes,
+            updated: importResult.updatedNodes,
+            removed: importResult.removedNodes,
+          })
+        : empty
+          ? this.t("session.syncGoal.import", { files: scan.stats.files })
+          : this.t("session.syncGoal.sync", {
+              files: scan.stats.files,
+              added: importResult.addedNodes,
+              updated: importResult.updatedNodes,
+              removed: importResult.removedNodes,
+            });
       const intent: Intent = {
         id: ulid(),
         versionId,
@@ -726,26 +1314,55 @@ export class ProjectSession {
         tasks: [
           {
             id: ulid(),
-            title: empty ? "Review the initial architecture import" : "Review the source synchronization",
+            title: amendment
+              ? this.t("session.syncTask.amendment")
+              : empty
+                ? this.t("session.syncTask.import")
+                : this.t("session.syncTask.sync"),
             status: "pending",
             dependsOn: [],
-            acceptance: [
-              "Every L0 module has a recognizable responsibility",
-              "L1 units map to real files",
-              "Removals do not delete still-needed architecture",
-            ],
+            acceptance: amendment
+              ? [
+                  this.t("session.syncAcceptance.amendment.1"),
+                  this.t("session.syncAcceptance.amendment.2"),
+                  this.t("session.syncAcceptance.amendment.3"),
+                ]
+              : [
+                  this.t("session.syncAcceptance.import.1"),
+                  this.t("session.syncAcceptance.import.2"),
+                  this.t("session.syncAcceptance.import.3"),
+                ],
           },
         ],
-        nodeIntents: [],
+        nodeIntents: scanNodeIntents(scan.nodes),
         author: this.currentActor(),
         createdAt: nowIso(),
+        mode: "architecture",
       };
       const proposal = this.makeProposal(intent, importResult.ops, [], null);
+      proposal.architectureOnly = true;
       this.proposal = proposal;
+      const summary = `${this.scanStatusSummary(scan)}${
+        semanticSummary ? ` ${semanticSummary}` : ""
+      }`;
       this.addMessage(
         "assistant",
-        "scan",
-        `${empty ? "Initial architecture import" : "Architecture sync"} is ready for review: ${importResult.addedNodes} added, ${importResult.updatedNodes} updated, ${importResult.removedNodes} removed. ${this.scanStatusSummary(scan)}`,
+        amendment ? "proposal" : "scan",
+        amendment
+          ? this.t("session.amendmentReady", {
+              ordinal,
+              added: importResult.addedNodes,
+              updated: importResult.updatedNodes,
+              removed: importResult.removedNodes,
+              summary,
+            })
+          : this.t("session.importReady", {
+              kind: empty ? this.t("session.importKindInitial") : this.t("session.importKindSync"),
+              added: importResult.addedNodes,
+              updated: importResult.updatedNodes,
+              removed: importResult.removedNodes,
+              summary,
+            }),
         { proposalId: proposal.id },
       );
       this.emitState();
@@ -759,13 +1376,120 @@ export class ProjectSession {
       this.addMessage(
         "assistant",
         "error",
-        `Scan failed: ${error instanceof Error ? error.message : String(error)}`,
+        this.t("session.scanFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        }),
       );
       this.emitState();
       return this.getState();
     } finally {
       this.abortController = null;
     }
+  }
+
+  async amendArchitecture(versionId: string): Promise<AppState> {
+    return this.scan({ amendmentOf: versionId });
+  }
+
+  /**
+   * Conflicts whose version has a later approved merge intent are still part of
+   * the ledger's history, but they are no longer open work.
+   */
+  private openConflicts(): WalConflict[] {
+    if (this.conflicts.length === 0) return [];
+    const resolved = new Set<string>();
+    for (const version of Object.values(this.snapshot.versions)) {
+      if (!["approved", "implemented", "verified"].includes(version.status)) continue;
+      const intent = this.snapshot.intents[version.intentId];
+      for (const id of intent?.resolves ?? []) resolved.add(id);
+    }
+    if (resolved.size === 0) return this.conflicts;
+    return this.conflicts.filter(
+      (conflict) => !conflict.versionId || !resolved.has(conflict.versionId),
+    );
+  }
+
+  /**
+   * Draft a merge intent for versions the fold had to skip after a Git merge.
+   * The proposal is a three-way merge of each branch's own base and target, so
+   * one branch's target never silently reverts the other branch's changes.
+   */
+  async mergeIntent(): Promise<AppState> {
+    if (this.proposal?.status === "in_review") {
+      throw new Error(this.t("error.mergeWhileReviewing"));
+    }
+    const conflicts = this.openConflicts();
+    if (conflicts.length === 0) {
+      throw new Error(this.t("error.noMergeConflicts"));
+    }
+    if (conflicts.some((conflict) => FATAL_WAL_CONFLICTS.has(conflict.code))) {
+      throw new Error(this.t("error.fatalMergeConflicts"));
+    }
+    const conflicted = Object.values(this.snapshot.versions)
+      .filter((version) => version.status === "conflicted")
+      .sort((left, right) => (left.ordinal ?? 0) - (right.ordinal ?? 0));
+    if (conflicted.length === 0) {
+      throw new Error(this.t("error.noConflictedVersion"));
+    }
+    const sources = conflicted.map((version) => {
+      const replay = replayWalVersion(this.records, version.id);
+      return {
+        versionId: version.id,
+        base: replay.baseSnapshot,
+        target: replay.targetSnapshot,
+      };
+    });
+    const plan = planMerge(this.snapshot, sources);
+    const versionId = ulid();
+    const labels = conflicted.map((version) => `v${version.ordinal ?? "?"}`).join(", ");
+    const intent: Intent = {
+      id: ulid(),
+      versionId,
+      title: this.t("session.mergeTitle", { labels }),
+      goal: this.t("session.mergeGoal", { count: conflicted.length }),
+      tasks: [
+        {
+          id: ulid(),
+          title: this.t("session.mergeTask"),
+          status: "pending",
+          dependsOn: [],
+          acceptance: [
+            this.t("session.mergeAcceptance.1"),
+            this.t("session.mergeAcceptance.2"),
+            this.t("session.mergeAcceptance.3"),
+          ],
+        },
+      ],
+      nodeIntents: [],
+      author: this.currentActor(),
+      createdAt: nowIso(),
+      mode: "architecture",
+      resolves: conflicted.map((version) => version.id),
+    };
+    const proposal = this.makeProposal(intent, plan.ops, [], null);
+    proposal.architectureOnly = true;
+    plan.notes.forEach((note, index) => {
+      proposal.risks.push({
+        id: `risk:merge:${index}`,
+        level: "medium",
+        title: this.t("session.mergeRiskTitle"),
+        detail: note,
+      });
+    });
+    this.proposal = proposal;
+    this.addMessage(
+      "assistant",
+      "proposal",
+      this.t("session.mergeMessage", {
+        count: plan.ops.length,
+        labels,
+        ops: plan.ops.length,
+        collisions: this.t("session.mergeCollisions", { count: plan.notes.length }),
+      }),
+      { proposalId: proposal.id },
+    );
+    this.emitState();
+    return this.getState();
   }
 
   private recordBase(versionId: string, parents: readonly string[]): RecordBase {
@@ -787,13 +1511,14 @@ export class ProjectSession {
     });
   }
 
-  private appendBundle(proposal: InternalProposal, decision: "approved" | "rejected", note: string): void {
+  private appendBundle(
+    proposal: InternalProposal,
+    decision: "approved" | "rejected",
+    note: string,
+  ): void {
     const versionId = proposal.id;
     const heads = walHeads(this.records);
-    const intentRecord = makeIntentRecord(
-      this.recordBase(versionId, heads),
-      proposal.intent,
-    );
+    const intentRecord = makeIntentRecord(this.recordBase(versionId, heads), proposal.intent);
     let parents = [intentRecord.id];
     const opRecords = proposal.ops.map((op) => {
       const record = makeOpRecord(this.recordBase(versionId, parents), op);
@@ -818,41 +1543,36 @@ export class ProjectSession {
       signature: this.signature(versionId, proposal.diffHash, createdAt),
       createdAt,
     };
-    const decisionRecord = makeDecisionRecord(
-      this.recordBase(versionId, parents),
-      decisionPayload,
-    );
-    const records: WalRecord[] = [
-      intentRecord,
-      ...opRecords,
-      ...touchRecords,
-      decisionRecord,
-    ];
-    for (const record of records) {
-      appendRecord(walPath(this.root), record);
-    }
+    const decisionRecord = makeDecisionRecord(this.recordBase(versionId, parents), decisionPayload);
+    const records: WalRecord[] = [intentRecord, ...opRecords, ...touchRecords, decisionRecord];
+    // One fsync for the whole bundle instead of one per op. A 2,000-node import
+    // otherwise blocks the main process for tens of seconds.
+    appendRecords(walPath(this.root), records);
+    for (const record of records) this.localWrites.add(record.id);
     proposal.opRecordIds = opRecords.map((record) => record.id);
     this.refreshFromWal();
   }
 
   async approveProposal(id: string, note = ""): Promise<AppState> {
     const proposal = this.proposal;
-    if (!proposal || proposal.id !== id) throw new Error("No matching proposal is in review.");
-    if (proposal.status !== "in_review") throw new Error("This proposal is no longer in review.");
+    if (!proposal || proposal.id !== id) throw new Error(this.t("error.noMatchingProposal"));
+    if (proposal.status !== "in_review") throw new Error(this.t("error.proposalNotInReview"));
     if (hashSnapshot(this.snapshot) !== proposal.baseHash) {
       proposal.status = "stale";
       this.emitState();
-      throw new Error("The architecture changed while you were reviewing. Rescan and create a fresh proposal.");
+      throw new Error(this.t("error.architectureChanged"));
     }
     const preview = previewOps(this.snapshot, proposal.ops, proposal.id);
     if (preview.conflicts.length > 0) {
       proposal.status = "stale";
       this.emitState();
-      throw new Error(`The proposal is stale: ${preview.conflicts.join("; ")}`);
+      throw new Error(this.t("error.staleProposal", { conflicts: preview.conflicts.join("; ") }));
     }
     const target = preview.snapshot;
     const intentConflicts = applyIntent(target, proposal.intent);
-    if (intentConflicts.length > 0) throw new Error(intentConflicts[0]?.message ?? "Intent target missing");
+    if (intentConflicts.length > 0) {
+      throw new Error(intentConflicts[0]?.message ?? this.t("error.intentTargetMissing"));
+    }
     for (const touch of proposal.touches) {
       const conflict = applyTouch(target, touch);
       if (conflict) throw new Error(conflict.message);
@@ -860,29 +1580,50 @@ export class ProjectSession {
     if (hashSnapshot(target) !== proposal.targetHash) {
       proposal.status = "stale";
       this.emitState();
-      throw new Error("The target snapshot changed since review; rescan before approving.");
+      throw new Error(this.t("error.targetChanged"));
     }
     if (diffHashForChanges(proposal.intent, proposal.ops, proposal.touches) !== proposal.diffHash) {
-      throw new Error("The proposal change set no longer matches its review hash.");
+      throw new Error(this.t("error.diffHashMismatch"));
     }
     try {
       this.appendBundle(proposal, "approved", note);
     } catch (error) {
-      this.addMessage("assistant", "error", `Approval was written incompletely: ${error instanceof Error ? error.message : String(error)}`);
+      this.addMessage(
+        "assistant",
+        "error",
+        this.t("session.approvalIncomplete", {
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
       this.emitState();
       throw error;
     }
     proposal.status = "approved";
     const version = this.snapshot.versions[proposal.id];
     const ordinal = version?.ordinal ?? "?";
-    this.addMessage(
-      "assistant",
-      "text",
-      `Approved version ${ordinal}. ${this.deps.settings.isAgentConfigured() ? "Starting implementation." : "No AI provider is configured, so implementation is paused. Open Settings to configure one."}`,
-      { proposalId: proposal.id },
-    );
+    if (proposal.architectureOnly) {
+      this.addMessage("assistant", "text", this.t("session.approvedArchitecture", { ordinal }), {
+        proposalId: proposal.id,
+      });
+    } else {
+      this.addMessage(
+        "assistant",
+        "text",
+        this.t("session.approvedVersion", {
+          ordinal,
+          next: this.deps.settings.isAgentConfigured()
+            ? this.t("session.startingImplementation")
+            : this.t("session.implementationPaused"),
+        }),
+        { proposalId: proposal.id },
+      );
+    }
     this.emitState();
-    if (this.deps.settings.isAgentConfigured() && this.deps.settings.get().agent.autoImplement) {
+    if (
+      !proposal.architectureOnly &&
+      this.deps.settings.isAgentConfigured() &&
+      this.deps.settings.get().agent.autoImplement
+    ) {
       void this.implementVersion(proposal);
     }
     return this.getState();
@@ -890,15 +1631,18 @@ export class ProjectSession {
 
   async rejectProposal(id: string, note = ""): Promise<AppState> {
     const proposal = this.proposal;
-    if (!proposal || proposal.id !== id) throw new Error("No matching proposal is in review.");
+    if (!proposal || proposal.id !== id) throw new Error(this.t("error.noMatchingProposal"));
     if (proposal.status !== "in_review" && proposal.status !== "stale") {
-      throw new Error("This proposal is no longer rejectable.");
+      throw new Error(this.t("error.proposalNotRejectable"));
     }
     this.appendBundle(proposal, "rejected", note);
     proposal.status = "rejected";
-    this.addMessage("assistant", "text", `Rejected the proposal${note ? `: ${note}` : "."}`, {
-      proposalId: proposal.id,
-    });
+    this.addMessage(
+      "assistant",
+      "text",
+      note ? this.t("session.rejectedWithNote", { note }) : this.t("session.rejected"),
+      { proposalId: proposal.id },
+    );
     this.emitState();
     return this.getState();
   }
@@ -912,7 +1656,9 @@ export class ProjectSession {
         const content = readFileSync(join(this.root, path), "utf8");
         const budget = Math.min(28_000, maxChars - total);
         const slice = content.slice(0, budget);
-        chunks.push(`--- FILE: ${path} ---\n${slice}${content.length > budget ? "\n… truncated …" : ""}`);
+        chunks.push(
+          `--- FILE: ${path} ---\n${slice}${content.length > budget ? "\n… truncated …" : ""}`,
+        );
         total += slice.length;
       } catch {
         // Missing files are expected for new components.
@@ -922,24 +1668,16 @@ export class ProjectSession {
   }
 
   private safeWritePath(relativePath: string): { relative: string; absolute: string } {
-    const clean = relativePath.replace(/\\/g, "/").replace(/^\.\/+/, "");
-    if (!clean || clean.includes("\0") || clean.startsWith("/") || /^[A-Za-z]:\//.test(clean)) {
-      throw new Error(`Unsafe file path: ${relativePath}`);
-    }
-    const parts = clean.split("/");
-    const blocked = new Set([".git", ".jin", "node_modules", "dist", "dist-electron", "release"]);
-    if (parts.some((part) => part === "..") || blocked.has(parts[0] ?? "")) {
-      throw new Error(`Refusing to write Jin/Git/toolchain path: ${relativePath}`);
-    }
+    const clean = normalizeProjectPath(relativePath);
     const rootReal = resolve(this.root);
     const absolute = resolve(rootReal, clean);
     if (absolute !== rootReal && !absolute.startsWith(`${rootReal}${sep}`)) {
-      throw new Error(`Path escapes the project root: ${relativePath}`);
+      throw new Error(this.t("error.pathEscapesRoot", { path: relativePath }));
     }
     if (existsSync(absolute)) {
       const real = realpathSync(absolute);
       if (real !== rootReal && !real.startsWith(`${rootReal}${sep}`)) {
-        throw new Error(`Path escapes through a symlink: ${relativePath}`);
+        throw new Error(this.t("error.pathEscapesSymlink", { path: relativePath }));
       }
     }
     return { relative: clean, absolute };
@@ -966,20 +1704,21 @@ export class ProjectSession {
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
     const provider = this.deps.settings.providerConfig();
-    if (provider.kind === "none" || (provider.kind === "openai-compatible" && !provider.apiKey)) {
-      this.agentStatus = { phase: "error", message: "No usable AI provider configured." };
+    if (!isProviderConfigured(provider)) {
+      this.agentStatus = { phase: "error", message: this.t("session.noProvider") };
       this.emitState();
       return;
     }
     this.agentStatus = {
       phase: "implementing",
-      message: `Implementing ${proposal.intent.title}…`,
+      message: this.t("session.implementing", { title: proposal.intent.title }),
       versionId: proposal.id,
     };
     this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
     try {
       await this.ensureScan(signal);
-      const reusePlan = proposal.reusePlan ?? this.rag.plan(`${proposal.intent.title}\n${proposal.intent.goal}`);
+      const reusePlan =
+        proposal.reusePlan ?? this.rag.plan(`${proposal.intent.title}\n${proposal.intent.goal}`);
       proposal.reusePlan = reusePlan;
       const wantedPaths = new Set<string>();
       for (const op of proposal.ops) {
@@ -1000,73 +1739,297 @@ export class ProjectSession {
       for (const candidate of reusePlan.candidates.slice(0, 6)) wantedPaths.add(candidate.path);
       const context = this.fileContext([...wantedPaths]);
       const skills = this.skills.promptFor(`${proposal.intent.title}\n${proposal.intent.goal}`);
-      const system = `You are Jin's implementation agent. The architecture has already been approved by a human; code must conform to it.
+      const customSystem = `You are Jin's implementation agent. The architecture has already been approved by a human; code must conform to it.
 Rules:
 - Reuse existing code from the provided context before creating new units. Do not duplicate a component/service/hook.
-- Write complete file contents, not unified diffs.
+- Prefer unified-diff edits for existing files. A patch may contain one or more files with standard ---/+++ headers.
+- Use complete file contents only for new files, or when a patch cannot represent the change.
 - Never modify .jin/, .git/, node_modules/, dist/, dist-electron/, or release/.
 - Keep the change scoped to the approved Intent and Ops.
 - You may add tests and small internal helpers when needed.
-- Return strict JSON only: {"summary":"...","edits":[{"path":"relative/file.ts","content":"complete file content"}],"notes":["..."]}
-- Use {"path":"...","delete":true} to delete a file.
+- Return strict JSON only: {"summary":"...","edits":[{"path":"relative/file.ts","patch":"--- a/relative/file.ts\\n+++ b/relative/file.ts\\n@@ ..."}],"notes":["..."]}
+- A patch edit may include a separate "path" when the patch contains hunks only.
+- Use {"path":"...","delete":true} to delete a file. Only invent full "content" for new files.
 - If an approved file cannot be implemented, explain it in notes rather than inventing unrelated files.`;
-      const user = [
+      const ekoSystem = `You are Jin's implementation agent running inside Eko. The architecture has already been approved by a human; code must conform to it.
+Rules:
+- Use architecture to re-read the approved L0/L1/facet graph and structural ops before editing.
+- Use search_code before writing a new component, hook, service or helper; reuse an existing unit when it fits.
+- Use read_file to inspect current source. Use apply_patch for existing files; every edit is a unified diff and is staged virtually.
+- Use write_file only for new files or when a patch cannot represent the change.
+- Use delete_file for approved removals. All edits are staged virtually; they are applied atomically after the run.
+- Use run_shell for bounded project checks or inspection. Commands must stay inside the project, time out quickly, and are audited in .jin/cache/shell-audit.jsonl.
+- Never modify .jin/, .git/, node_modules/, dist/, dist-electron/, or release/. The tools reject those paths.
+- Keep the change scoped to the approved Intent and Ops. You may add tests and small internal helpers when needed.
+- Work until the implementation is complete, then finish with a short plain-text summary of what changed.
+- If an approved file cannot be implemented, explain why in the summary instead of inventing unrelated files.`;
+      const settings = this.deps.settings.get();
+      const sharedTask = [
         `Intent:\n${JSON.stringify(proposal.intent, null, 2)}`,
         `Approved structural ops:\n${JSON.stringify(proposal.ops, null, 2)}`,
         `Touch records:\n${JSON.stringify(proposal.touches, null, 2)}`,
         `ReusePlan:\n${JSON.stringify(reusePlan, null, 2)}`,
         skills ? `Skills:\n${skills}` : "",
-        context ? `Existing source context:\n${context}` : "No existing source files were selected.",
-        "Return the JSON object now.",
+        context
+          ? `Existing source context:\n${context}`
+          : "No existing source files were selected.",
       ]
         .filter(Boolean)
         .join("\n\n");
-      const json = await completeJson(provider as ProviderConfig, system, user, {
-        temperature: this.deps.settings.get().agent.temperature,
-        maxTokens: this.deps.settings.get().agent.maxTokens,
-        json: true,
-        signal,
-      });
-      const rawEdits = Array.isArray(json.edits) ? json.edits : [];
-      const changedFiles: string[] = [];
       const warnings: string[] = [];
+      let rawEdits: unknown[] = [];
+      let summary = "";
+      let notes: string[] = [];
+      let usedRuntime: "custom" | "eko" = "custom";
+      if (settings.agent.runtime === "eko") {
+        this.agentStatus = {
+          ...this.agentStatus,
+          message: this.t("session.ekoImplementing"),
+        };
+        this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
+        this.startStream(this.t("chat.streamImplementing"), proposal.id);
+        try {
+          const eko = await runEkoCoder({
+            root: this.root,
+            provider: provider as ProviderConfig,
+            system: ekoSystem,
+            task: `${sharedTask}\n\nImplement the approved architecture now using the staging tools. Finish with a short summary.`,
+            temperature: settings.agent.temperature,
+            maxTokens: settings.agent.maxTokens,
+            signal,
+            snapshot: this.snapshot,
+            intent: proposal.intent,
+            ops: proposal.ops,
+            reusePlan,
+            searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
+            onUsage: (usage) => this.recordUsage("eko", provider.model, usage),
+            onText: (text, done) => {
+              if (signal.aborted) return;
+              this.updateStream(text, {
+                label: this.t("chat.streamImplementing"),
+                phase: done ? "thinking" : "responding",
+              });
+            },
+            onProgress: (message) => {
+              if (signal.aborted) return;
+              this.agentStatus = { ...this.agentStatus, message };
+              this.updateStream(this.stream?.content ?? "", {
+                label: message,
+                phase: "thinking",
+              });
+              this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
+            },
+          });
+          if (eko.edits.length > 0) {
+            rawEdits = eko.edits;
+            summary = eko.summary;
+            notes = eko.notes;
+            warnings.push(...eko.warnings);
+            usedRuntime = "eko";
+          } else {
+            warnings.push(...eko.warnings, this.t("session.ekoNoChanges"));
+          }
+        } catch (error) {
+          if (signal.aborted) throw error;
+          warnings.push(
+            this.t("session.ekoFailed", {
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        }
+      }
+      this.finishStream();
+      if (usedRuntime === "custom") {
+        this.startStream(this.t("chat.streamImplementing"), proposal.id);
+        let raw = "";
+        const json = await completeJson(
+          provider as ProviderConfig,
+          customSystem,
+          `${sharedTask}\n\nReturn the JSON object now.`,
+          {
+            temperature: settings.agent.temperature,
+            maxTokens: settings.agent.maxTokens,
+            json: true,
+            signal,
+            onUsage: (usage) => this.recordUsage("implement", provider.model, usage),
+            onDelta: (delta) => {
+              if (signal.aborted) return;
+              raw += delta;
+              const preview = streamingPreview(raw, ["summary", "notes", "message"]);
+              if (preview) {
+                this.updateStream(preview, {
+                  label: this.t("chat.streamImplementing"),
+                  phase: "responding",
+                });
+              }
+            },
+          },
+        );
+        rawEdits = Array.isArray(json.edits) ? json.edits : [];
+        summary = typeof json.summary === "string" ? json.summary : "";
+        notes = Array.isArray(json.notes)
+          ? json.notes.filter((note): note is string => typeof note === "string")
+          : [];
+        this.finishStream();
+      }
+      const changedFiles: string[] = [];
+      const deletedFiles: string[] = [];
+      const appliedEdits: Array<{ path: string; content: string }> = [];
+      const originalFiles = new Map<string, { exists: boolean; content: string }>();
+      const stagedFiles = new Map<string, StagedFileEdit>();
+      const editErrors: string[] = [];
+      const currentFile = (target: { absolute: string }) => {
+        const staged = stagedFiles.get(target.absolute);
+        if (staged) return { exists: staged.content !== null, content: staged.content ?? "" };
+        let original = originalFiles.get(target.absolute);
+        if (!original) {
+          const exists = existsSync(target.absolute);
+          original = {
+            exists,
+            content: exists ? readFileSync(target.absolute, "utf8") : "",
+          };
+          originalFiles.set(target.absolute, original);
+        }
+        return { exists: original.exists, content: original.content };
+      };
+      const stageFile = (
+        target: { relative: string; absolute: string },
+        content: string | null,
+      ): void => {
+        if (!originalFiles.has(target.absolute)) currentFile(target);
+        const original = originalFiles.get(target.absolute);
+        if (!original) throw new Error(`Missing original state for ${target.relative}`);
+        stagedFiles.set(target.absolute, {
+          path: target.relative,
+          absolute: target.absolute,
+          content,
+          originalExists: original.exists,
+          originalContent: original.content,
+        });
+      };
       for (const raw of rawEdits) {
-        if (signal.aborted) throw new Error("Implementation cancelled");
-        if (typeof raw !== "object" || raw === null) continue;
+        if (signal.aborted) throw new Error(this.t("error.implementationCancelled"));
+        if (typeof raw !== "object" || raw === null) {
+          editErrors.push("The model returned an edit that is not an object.");
+          continue;
+        }
         const edit = raw as Record<string, unknown>;
         const path = typeof edit.path === "string" ? edit.path : "";
-        if (!path) continue;
-        const target = this.safeWritePath(path);
-        if (edit.delete === true || edit.content === null) {
-          if (existsSync(target.absolute)) {
-            unlinkSync(target.absolute);
-            changedFiles.push(target.relative);
+        if (typeof edit.patch === "string" && edit.patch.trim()) {
+          let patchedFiles;
+          try {
+            patchedFiles = parseUnifiedPatch(edit.patch, path || undefined);
+          } catch (error) {
+            editErrors.push(
+              this.t("session.patchFailed", {
+                path: path || this.t("common.patch"),
+                message: error instanceof Error ? error.message : String(error),
+              }),
+            );
+            continue;
+          }
+          for (const file of patchedFiles) {
+            let target;
+            try {
+              target = this.safeWritePath(file.path);
+            } catch (error) {
+              editErrors.push(
+                this.t("session.patchFailed", {
+                  path: file.path,
+                  message: error instanceof Error ? error.message : String(error),
+                }),
+              );
+              continue;
+            }
+            const current = currentFile(target);
+            if (file.isNew && current.exists) {
+              editErrors.push(this.t("session.skippedExisting", { path: file.path }));
+              continue;
+            }
+            if (!file.isNew && !file.isDelete && !current.exists) {
+              editErrors.push(this.t("session.skippedMissing", { path: file.path }));
+              continue;
+            }
+            try {
+              const patched = applyUnifiedPatchFile(current.content, file);
+              if (patched === null) {
+                if (current.exists) stageFile(target, null);
+                continue;
+              }
+              if (Buffer.byteLength(patched, "utf8") > MAX_EDIT_BYTES) {
+                editErrors.push(this.t("session.skippedTooLarge", { path: file.path }));
+                continue;
+              }
+              stageFile(target, patched);
+            } catch (error) {
+              editErrors.push(
+                this.t("session.patchFailed", {
+                  path: file.path,
+                  message: error instanceof Error ? error.message : String(error),
+                }),
+              );
+            }
           }
           continue;
         }
+        if (!path) {
+          editErrors.push("The model returned an edit without a project-relative path.");
+          continue;
+        }
+        const target = this.safeWritePath(path);
+        if (edit.delete === true || edit.content === null) {
+          if (currentFile(target).exists) stageFile(target, null);
+          continue;
+        }
         if (typeof edit.content !== "string") {
-          warnings.push(`Skipped ${path}: content must be a string`);
+          editErrors.push(this.t("session.skippedNotString", { path }));
           continue;
         }
         if (Buffer.byteLength(edit.content, "utf8") > MAX_EDIT_BYTES) {
-          warnings.push(`Skipped ${path}: content exceeds 2 MB`);
+          editErrors.push(this.t("session.skippedTooLarge", { path }));
           continue;
         }
-        this.writeFileAtomic(target.absolute, edit.content);
-        changedFiles.push(target.relative);
+        stageFile(target, edit.content);
       }
-      const summary = typeof json.summary === "string" ? json.summary : "";
-      const notes = Array.isArray(json.notes)
-        ? json.notes.filter((note): note is string => typeof note === "string")
-        : [];
+      if (editErrors.length > 0) {
+        throw new Error(this.t("session.editBatchFailed", { details: editErrors.join("\n") }));
+      }
+      const changed = [...stagedFiles.values()].filter((edit) =>
+        edit.content === null
+          ? edit.originalExists
+          : !edit.originalExists || edit.content !== edit.originalContent,
+      );
+      commitFileTransaction(changed, {
+        writeAtomic: (absolute, content) => this.writeFileAtomic(absolute, content),
+        checkCancelled: () => {
+          if (signal.aborted) throw new Error(this.t("error.implementationCancelled"));
+        },
+      });
+      for (const edit of changed) {
+        changedFiles.push(edit.path);
+        if (edit.content === null) deletedFiles.push(edit.path);
+        else appliedEdits.push({ path: edit.path, content: edit.content });
+      }
       this.agentStatus = {
         phase: "verifying",
-        message: "Running project checks and architecture conformance…",
+        message: this.t("session.verifying"),
         versionId: proposal.id,
       };
       this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
       const scan = await this.refreshFacts(signal);
-      const checks = await runProjectChecks(this.root);
+      const reuseCheck = evaluateReuse({
+        plan: reusePlan,
+        scan,
+        changedPaths: changedFiles,
+        deletedPaths: deletedFiles,
+        edits: appliedEdits,
+      });
+      const languageCheck = this.languageCheck();
+      const checks = [
+        reuseCheck,
+        ...(languageCheck ? [languageCheck] : []),
+        ...(await runProjectChecks(this.root)),
+      ];
       const version = this.snapshot.versions[proposal.id];
       const opRecordIds = proposal.opRecordIds ?? version?.ops ?? [];
       const verification = verifyArchitecture({
@@ -1092,46 +2055,63 @@ Rules:
         implementation,
       );
       appendRecord(walPath(this.root), record);
+      this.localWrites.add(record.id);
       this.refreshFromWal();
-      const passed =
-        verification.check.status === "pass" &&
-        checks.every((check) => check.status !== "fail");
+      const failed =
+        implementation.checks.some((check) => check.status === "fail") ||
+        verification.results.some((result) => result.status === "fail");
+      const verified = this.snapshot.versions[proposal.id]?.status === "verified";
       const details = [
-        `Summary: ${summary || "(none)"}`,
+        this.t("session.runtime", { runtime: usedRuntime }),
+        this.t("session.summary", { summary: summary || this.t("common.none") }),
         ...notes,
         ...warnings,
-        ...implementation.checks.map((check) => `${check.name}: ${check.status} — ${check.detail}`),
+        ...implementation.checks.map((check) =>
+          this.t("session.checkLine", {
+            name: check.name,
+            status: check.status,
+            detail: check.detail,
+          }),
+        ),
         ...verification.results
           .filter((result) => result.status === "fail")
-          .map((result) => `Conformance: ${result.evidence.join("; ")}`),
+          .map((result) =>
+            this.t("session.conformanceLine", { evidence: result.evidence.join("; ") }),
+          ),
       ].join("\n");
       this.addMessage(
         "assistant",
         "implementation",
-        passed
-          ? `Implementation recorded and verified for ${proposal.intent.title}.`
-          : `Implementation recorded for ${proposal.intent.title}, but some checks or conformance results failed. Review the details before committing.`,
+        verified
+          ? this.t("session.implementationVerified", { title: proposal.intent.title })
+          : failed
+            ? this.t("session.implementationChecksFailed", { title: proposal.intent.title })
+            : this.t("session.implementationIncomplete", { title: proposal.intent.title }),
         { proposalId: proposal.id, details },
       );
-      this.agentStatus = emptyAgentStatus();
+      this.agentStatus = this.emptyAgentStatus();
       this.emitState();
     } catch (error) {
-      const cancelled =
-        signal.aborted ||
-        (error instanceof Error && /cancel/i.test(error.message));
+      const cancelled = signal.aborted || (error instanceof Error && /cancel/i.test(error.message));
+      const message = this.errorMessage(error);
       this.agentStatus = cancelled
-        ? emptyAgentStatus()
+        ? this.emptyAgentStatus()
         : {
             phase: "error",
-            message: error instanceof Error ? error.message : String(error),
+            message,
           };
       this.addMessage(
         "assistant",
         cancelled ? "text" : "error",
         cancelled
-          ? "Implementation cancelled."
-          : `Implementation failed: ${error instanceof Error ? error.message : String(error)}`,
-        { proposalId: proposal.id },
+          ? this.t("session.implementationCancelled")
+          : this.t("session.implementationFailed", {
+              message,
+            }),
+        {
+          proposalId: proposal.id,
+          details: error instanceof ProviderError ? error.details : undefined,
+        },
       );
       this.emitState();
     } finally {
@@ -1141,21 +2121,24 @@ Rules:
 
   async retryImplementation(versionId?: string): Promise<AppState> {
     if (this.agentStatus.phase !== "idle" && this.agentStatus.phase !== "error") {
-      throw new Error("The agent is already working.");
+      throw new Error(this.t("error.agentAlreadyWorking"));
     }
     const targetId = versionId ?? this.proposal?.id;
-    if (!targetId) throw new Error("No version selected for implementation.");
+    if (!targetId) throw new Error(this.t("error.noVersionSelected"));
     if (this.proposal?.id === targetId && this.proposal.status === "approved") {
       void this.implementVersion(this.proposal);
       return this.getState();
     }
     const version = this.snapshot.versions[targetId];
-    if (!version) throw new Error("Unknown version.");
+    if (!version) throw new Error(this.t("error.unknownVersionShort"));
     if (!["approved", "implemented", "verified"].includes(version.status)) {
-      throw new Error("Only approved versions can be implemented.");
+      throw new Error(this.t("error.approvedOnly"));
     }
     const intent = this.snapshot.intents[version.intentId];
-    if (!intent) throw new Error("Version has no intent.");
+    if (!intent) throw new Error(this.t("error.versionNoIntentShort"));
+    if (intent.mode === "architecture") {
+      throw new Error(this.t("error.architectureOnlyImplementation"));
+    }
     const opRecords = this.records
       .filter((record) => record.versionId === targetId && record.t === "op")
       .sort((a, b) => (a.hlc < b.hlc ? -1 : a.hlc > b.hlc ? 1 : a.id < b.id ? -1 : 1));
@@ -1188,15 +2171,26 @@ Rules:
     this.abortController?.abort();
     this.abortController = null;
     if (this.agentStatus.phase !== "idle") {
-      this.agentStatus = { phase: "idle", message: "Cancellation requested." };
+      this.agentStatus = {
+        phase: "idle",
+        message: this.t("session.cancellationRequested"),
+      };
       this.emitState();
     }
   }
 
   async refresh(): Promise<AppState> {
-    if (this.refreshFromWal()) this.emitState();
+    if (this.refreshFromWal(true)) this.emitState();
     this.branch = this.readGitBranch();
     return this.getState();
+  }
+
+  /** Reconstruct a historical version from WAL ancestry without mutating the live fold. */
+  replayVersion(versionId: string): VersionReplay {
+    if (!this.snapshot.versions[versionId]) {
+      throw new Error(this.t("error.unknownVersion", { id: versionId }));
+    }
+    return replayWalVersion(this.records, versionId);
   }
 
   getFileTree(): FileNode {
@@ -1215,6 +2209,32 @@ Rules:
     return this.tools;
   }
 
+  /** Re-detect system and Marketplace language servers after install changes. */
+  refreshLsp(): LspStatus[] {
+    const files = this.scanResult?.files.map((file) => file.path) ?? [];
+    this.lsp = detectLanguageServers(files, this.marketplace.specs());
+    this.emitState();
+    return this.lsp;
+  }
+
+  /**
+   * Agent retrieval tool: query the same persisted RAG index used to build the
+   * ReusePlan. It is intentionally read-only and never changes the WAL.
+   */
+  searchCode(query: string, limit = 12): ReuseCandidate[] {
+    if (!query.trim()) return [];
+    return this.rag.search(query, limit);
+  }
+
+  /** Invoke an MCP tool through the audited manager. */
+  callMcpTool(
+    server: string,
+    tool: string,
+    args: Record<string, unknown> = {},
+  ): Promise<import("../../shared/ipc").McpCallResult> {
+    return this.mcp.call(server, tool, args);
+  }
+
   async refreshTools(): Promise<ToolsInfo> {
     const [skills, mcpServers] = await Promise.all([
       Promise.resolve(this.skills.list()),
@@ -1231,11 +2251,11 @@ Rules:
   }
 
   async installMergeDriver(): Promise<{ ok: boolean; message: string }> {
-    return installMergeDriver(this.root);
+    return installMergeDriver(this.root, this.deps.settings.get().language);
   }
 
   mergeInstructions(): string {
-    return mergeInstructions(this.root);
+    return mergeInstructions(this.root, this.deps.settings.get().language);
   }
 
   getState(): AppState {
@@ -1249,7 +2269,7 @@ Rules:
     };
     const wal: WalInfo = {
       records: this.records.length,
-      conflicts: this.conflicts,
+      conflicts: this.openConflicts(),
       warnings: this.warnings,
       lastRecordId: this.snapshot.lastRecordId,
     };
@@ -1264,8 +2284,13 @@ Rules:
       lsp: this.lsp,
       tools: this.tools,
       wal,
+      metrics: computeProjectMetrics(this.snapshot, this.usage.totals()),
+      context: {
+        ...this.lastContext,
+        model: this.lastContext.model || this.deps.settings.get().provider.model,
+      },
       agent: this.agentStatus,
-      fold: { conflicts: this.conflicts, warnings: this.warnings },
+      fold: { conflicts: this.openConflicts(), warnings: this.warnings },
     };
   }
 
@@ -1278,7 +2303,16 @@ Rules:
     this.closed = true;
     this.abortController?.abort();
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    if (this.sourceTimer) clearTimeout(this.sourceTimer);
     this.watcher?.close();
+    for (const watcher of this.sourceWatchers) {
+      try {
+        watcher.close();
+      } catch {
+        // best effort
+      }
+    }
+    this.sourceWatchers = [];
     try {
       this.index.close();
     } catch {
@@ -1286,4 +2320,3 @@ Rules:
     }
   }
 }
-

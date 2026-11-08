@@ -86,7 +86,11 @@ export interface PlannedNodeIntent {
   acceptance?: string[];
 }
 
+/** A turn is either a direct conversational reply or an architecture proposal. */
+export type PlanKind = "chat" | "plan";
+
 export interface PlanDraft {
+  kind: PlanKind;
   title: string;
   goal: string;
   tasks: PlannedTask[];
@@ -102,10 +106,21 @@ export interface NormalizedPlan {
   warnings: string[];
 }
 
+export interface PlannerHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface PlannerContext {
   snapshot: import("../../../shared/arch/types").ArchSnapshot;
   skills: string;
   reuseSummary: string;
+  /** Recent conversational turns, oldest first, for follow-up continuity. */
+  history?: readonly PlannerHistoryMessage[];
+  onUsage?: (usage: import("./provider").ProviderTokenUsage) => void;
+  /** Raw JSON deltas from the planner stream. */
+  onDelta?: (delta: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface PlannerConfig {

@@ -42,6 +42,9 @@ export function verifyArchitecture(input: VerifyInput): {
       .map((node) => [node.file, node]),
   );
   const results: ConformanceResult[] = [];
+  const pushOp = (result: Omit<ConformanceResult, "kind">): void => {
+    results.push({ ...result, kind: "op" });
+  };
 
   input.ops.forEach((op, index) => {
     const opId = input.opRecordIds[index] ?? `${input.snapshot.lastRecordId ?? "version"}:${index}`;
@@ -49,7 +52,7 @@ export function verifyArchitecture(input: VerifyInput): {
       const node = op.node;
       if (node.level === "facet" || node.kind === "external") {
         const fileNode = observedFiles.get(node.file);
-        results.push({
+        pushOp({
           opId,
           status: fileNode ? "pass" : "fail",
           evidence: fileNode
@@ -59,7 +62,7 @@ export function verifyArchitecture(input: VerifyInput): {
         return;
       }
       const where = observed.get(node.id);
-      results.push({
+      pushOp({
         opId,
         status: where ? "pass" : "fail",
         evidence: where
@@ -71,7 +74,7 @@ export function verifyArchitecture(input: VerifyInput): {
     if (op.op === "node.update") {
       const node = input.snapshot.nodes[op.id];
       const where = observed.get(op.id);
-      results.push({
+      pushOp({
         opId,
         status: where || (node?.level === "facet" && node.file) ? "pass" : "fail",
         evidence: where
@@ -85,7 +88,7 @@ export function verifyArchitecture(input: VerifyInput): {
     if (op.op === "node.remove") {
       const node = input.snapshot.nodes[op.id];
       const stillObserved = observed.has(op.id) || Boolean(node?.file && observedFiles.has(node.file));
-      results.push({
+      pushOp({
         opId,
         status: stillObserved ? "fail" : "pass",
         evidence: stillObserved
@@ -94,7 +97,7 @@ export function verifyArchitecture(input: VerifyInput): {
       });
       return;
     }
-    results.push({
+    pushOp({
       opId,
       status: "pass",
       evidence: [`Structural ${op.op} is declared in the approved snapshot`],
@@ -129,6 +132,7 @@ export function verifyArchitecture(input: VerifyInput): {
   const driftPass = undeclared.length === 0 && missing.length === 0;
   results.push({
     opId: input.opRecordIds[0] ?? "drift",
+    kind: "drift",
     status: driftPass ? "pass" : "fail",
     evidence: driftPass
       ? ["No architecture drift detected between approved L0/L1 nodes and source scan"]

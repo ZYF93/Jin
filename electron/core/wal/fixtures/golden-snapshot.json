@@ -1,0 +1,110 @@
+{
+  "snapshotHash": "sha256:07d14f7a14f8002eaf48e811c9cbc00568f6013ba669a425755d7601bd4556b8",
+  "versions": [
+    {
+      "id": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "intentId": "01HF7YAT092T4C3AAKQH6075V1",
+      "status": "approved",
+      "ordinal": 1,
+      "baseHash": "sha256:57501e5c6808b3e14852a4ea21dc7873abf9409032a06f9b740c973e83f62cf7",
+      "targetHash": "sha256:07d14f7a14f8002eaf48e811c9cbc00568f6013ba669a425755d7601bd4556b8",
+      "diffHash": "sha256:3d2ba76b902fb774f161855f7425b37fa0b0ecac26be133c32255eeae6cf09b9"
+    },
+    {
+      "id": "01HF7YAT02BPT76MP9H15XNEFG",
+      "intentId": "01HF7YAT0SA13STR3WW99VTD45",
+      "status": "approved",
+      "ordinal": 2,
+      "baseHash": "sha256:07d14f7a14f8002eaf48e811c9cbc00568f6013ba669a425755d7601bd4556b8",
+      "targetHash": "sha256:07d14f7a14f8002eaf48e811c9cbc00568f6013ba669a425755d7601bd4556b8",
+      "diffHash": "sha256:041e79aa069090435d3ebd4ae1a75767e87c00b146b0d85eb2ef037d32b4119c"
+    },
+    {
+      "id": "01HF7YAT0314R1HQHTRF5WZWAB",
+      "intentId": "01HF7YAT12NJD1G3A96T6PS38V",
+      "status": "rejected",
+      "ordinal": 3,
+      "baseHash": null,
+      "targetHash": null,
+      "diffHash": "sha256:de1893eeb6311e6cd723640f02799e3fb1216ebb9179a449ad83ac25e23dbea4"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "01HF7YAT044SSP1H8SKYSWABTA",
+      "level": "L0",
+      "kind": "system",
+      "parentId": null,
+      "name": "Counter App",
+      "path": "",
+      "file": "",
+      "responsibility": "System architecture for Counter App.",
+      "metadata": {
+        "origin": "fixture"
+      },
+      "introducedIn": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "updatedIn": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "lastTouchedIn": null
+    },
+    {
+      "id": "01HF7YAT05WD98MAE573977W9N",
+      "level": "L0",
+      "kind": "layer",
+      "parentId": "01HF7YAT044SSP1H8SKYSWABTA",
+      "name": "src",
+      "path": "src",
+      "file": "",
+      "responsibility": "Contains src source units.",
+      "metadata": {
+        "origin": "fixture"
+      },
+      "introducedIn": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "updatedIn": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "lastTouchedIn": null
+    },
+    {
+      "id": "01HF7YAT06CY5XXMJ3NQ3NPBSN",
+      "level": "L1",
+      "kind": "component",
+      "parentId": "01HF7YAT05WD98MAE573977W9N",
+      "name": "Counter",
+      "path": "src/Counter.tsx",
+      "file": "src/Counter.tsx",
+      "responsibility": "Renders the counter and reset control.",
+      "metadata": {
+        "origin": "fixture"
+      },
+      "introducedIn": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "updatedIn": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "lastTouchedIn": "01HF7YAT02BPT76MP9H15XNEFG"
+    },
+    {
+      "id": "01HF7YAT0709Q0EHWSE41ZY6Z8",
+      "level": "facet",
+      "kind": "method",
+      "parentId": "01HF7YAT06CY5XXMJ3NQ3NPBSN",
+      "name": "reset",
+      "path": "src/Counter.tsx",
+      "file": "src/Counter.tsx",
+      "responsibility": "method reset on Counter.",
+      "metadata": {
+        "origin": "fixture"
+      },
+      "introducedIn": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "updatedIn": "01HF7YAT01W8VZEYM5S17CPH7V",
+      "lastTouchedIn": "01HF7YAT02BPT76MP9H15XNEFG"
+    }
+  ],
+  "edges": [
+    {
+      "id": "01HF7YAT08H6FVGMDHRXKTPNF9",
+      "from": "01HF7YAT06CY5XXMJ3NQ3NPBSN",
+      "to": "01HF7YAT0709Q0EHWSE41ZY6Z8",
+      "kind": "contains",
+      "metadata": {
+        "origin": "fixture"
+      },
+      "introducedIn": "01HF7YAT01W8VZEYM5S17CPH7V"
+    }
+  ]
+}

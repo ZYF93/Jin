@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { ArchSnapshot } from "../../../shared/arch/types";
 import { hashSnapshot } from "../arch/snapshot";
 
-export const INDEX_SCHEMA_VERSION = 1;
+export const INDEX_SCHEMA_VERSION = 2;
 
 export interface IndexMeta {
   schemaVersion: number;
@@ -135,6 +135,44 @@ export function initializeSchema(db: DatabaseSync): void {
       tokenize = 'unicode61'
     );
 
+    CREATE TABLE IF NOT EXISTS rag_docs (
+      path TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      symbols TEXT NOT NULL,
+      responsibility TEXT NOT NULL,
+      text TEXT NOT NULL,
+      node_id TEXT,
+      vector BLOB NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS rag_fts USING fts5(
+      path UNINDEXED,
+      tokens,
+      tokenize = 'unicode61'
+    );
+
+    CREATE TABLE IF NOT EXISTS lsp_symbols (
+      path TEXT NOT NULL,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      line INTEGER NOT NULL,
+      character INTEGER NOT NULL,
+      detail TEXT NOT NULL,
+      PRIMARY KEY(path, name, line, character)
+    );
+
+    CREATE TABLE IF NOT EXISTS lsp_diagnostics (
+      path TEXT NOT NULL,
+      line INTEGER NOT NULL,
+      character INTEGER NOT NULL,
+      severity TEXT NOT NULL,
+      message TEXT NOT NULL,
+      source TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lsp_symbols_path ON lsp_symbols(path);
+    CREATE INDEX IF NOT EXISTS idx_lsp_diagnostics_path ON lsp_diagnostics(path);
     CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
     CREATE INDEX IF NOT EXISTS idx_nodes_level ON nodes(level);
     CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);

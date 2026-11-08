@@ -1,8 +1,10 @@
 import type {
   ArchEdge,
   ArchNode,
+  ArchNodeDraft,
   ArchOp,
   ArchSnapshot,
+  Intent,
 } from "../../../shared/arch/types";
 import { hashEdgeForWrite, hashNodeForWrite } from "../arch/snapshot";
 import type { ScanResult } from "./scanner";
@@ -28,14 +30,27 @@ export interface ScanImportResult {
   removedEdges: number;
 }
 
+/** Give imported architecture nodes their source-derived purpose, separate from the scan task. */
+export function scanNodeIntents(nodes: readonly ArchNodeDraft[]): Intent["nodeIntents"] {
+  return nodes
+    .filter(
+      (node) =>
+        node.level === "L1" ||
+        (node.level === "L0" && node.kind !== "system" && node.kind !== "external"),
+    )
+    .map((node) => ({
+      nodeId: node.id,
+      statement: node.responsibility,
+      invariants: [],
+      acceptance: [],
+    }));
+}
+
 /**
  * Turn a fresh structural scan into a reviewable set of ops. Only scan-owned
  * nodes/edges can be removed; manually approved architecture survives a rescan.
  */
-export function diffScanToOps(
-  snapshot: ArchSnapshot,
-  scan: ScanResult,
-): ScanImportResult {
+export function diffScanToOps(snapshot: ArchSnapshot, scan: ScanResult): ScanImportResult {
   const scannedNodes = new Map(scan.nodes.map((node) => [node.id, node]));
   const scannedEdges = new Map(scan.edges.map((edge) => [edge.id, edge]));
 
@@ -52,10 +67,7 @@ export function diffScanToOps(
   }
 
   const removable = Object.values(snapshot.nodes).filter(
-    (node) =>
-      isScanNode(node) &&
-      !scannedNodes.has(node.id) &&
-      node.kind !== "system",
+    (node) => isScanNode(node) && !scannedNodes.has(node.id) && node.kind !== "system",
   );
   const removedIds = new Set(removable.map((node) => node.id));
 

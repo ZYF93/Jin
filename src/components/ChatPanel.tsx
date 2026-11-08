@@ -1,14 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   Bot,
   CheckCircle2,
-  CornerDownLeft,
   GitPullRequest,
   MessageSquare,
   ScanSearch,
-  Send,
   ShieldCheck,
   Sparkles,
   Square,
@@ -16,24 +14,22 @@ import {
   XCircle,
 } from "lucide-react";
 import type { ChatMessage } from "../../shared/ipc";
-import {
-  formatTime,
-  isReviewing,
-  nextOrdinal,
-  ordinalLabel,
-} from "../lib/utils";
+import type { MessageKey } from "../../shared/i18n";
+import { useT } from "../lib/i18n";
+import { formatTime, isReviewing, nextOrdinal, ordinalLabel } from "../lib/utils";
+import { isProviderConfigured } from "../../shared/provider";
 import { useJin } from "../state/useJin";
+import { ChatComposer } from "./ChatComposer";
+import { MarkdownContent } from "./MarkdownContent";
 import { Spinner } from "./ui";
 
 function messageTone(message: ChatMessage): string {
   if (message.role === "system") return "border-transparent bg-transparent";
   if (message.kind === "error") return "border-rose-400/25 bg-rose-400/[0.055]";
   if (message.kind === "proposal") return "border-amber-300/20 bg-amber-300/[0.04]";
-  if (message.kind === "implementation")
-    return "border-emerald-400/20 bg-emerald-400/[0.04]";
+  if (message.kind === "implementation") return "border-emerald-400/20 bg-emerald-400/[0.04]";
   if (message.kind === "scan") return "border-[var(--border)] bg-[var(--panel-soft)]";
-  if (message.role === "user")
-    return "border-cyan-300/20 bg-[var(--accent-soft)]";
+  if (message.role === "user") return "border-cyan-300/20 bg-[var(--accent-soft)]";
   return "border-[var(--border)] bg-[var(--panel-soft)]";
 }
 
@@ -44,22 +40,27 @@ function MessageIcon({ message }: { message: ChatMessage }) {
     return <GitPullRequest size={12} className="text-[var(--warning)]" />;
   if (message.kind === "implementation")
     return <CheckCircle2 size={12} className="text-[var(--success)]" />;
-  if (message.kind === "scan")
-    return <ScanSearch size={12} className="text-[var(--violet)]" />;
+  if (message.kind === "scan") return <ScanSearch size={12} className="text-[var(--violet)]" />;
   if (message.role === "user") return <User size={12} className="text-[var(--accent)]" />;
   if (message.role === "assistant") return <Bot size={12} className="text-[var(--violet)]" />;
   return <Sparkles size={12} className={cls} />;
 }
 
+const ROLE_KEYS: Record<string, MessageKey> = {
+  user: "role.user",
+  assistant: "role.assistant",
+  system: "role.system",
+  tool: "role.tool",
+};
+
 function ChatBubble({ message }: { message: ChatMessage }) {
+  const t = useT();
   const proposal = useJin((state) => state.app?.proposal ?? null);
   const setReviewOpen = useJin((state) => state.setReviewOpen);
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const current =
-    proposal && message.proposalId && proposal.id === message.proposalId
-      ? proposal
-      : null;
+    proposal && message.proposalId && proposal.id === message.proposalId ? proposal : null;
 
   if (isSystem) {
     return (
@@ -82,25 +83,29 @@ function ChatBubble({ message }: { message: ChatMessage }) {
         <MessageIcon message={message} />
       </div>
       <div className={`min-w-0 max-w-[calc(100%-28px)] ${isUser ? "text-right" : ""}`}>
-        <div
-          className={`rounded-xl border px-2.5 py-2 text-left ${messageTone(message)}`}
-        >
-          <div className="message-prose text-[10.5px] leading-relaxed text-[var(--muted)]">
-            {message.content}
-          </div>
+        <div className={`rounded-xl border px-2.5 py-2 text-left ${messageTone(message)}`}>
+          {message.kind === "error" ? (
+            <div className="mb-1 text-[9px] font-bold text-[var(--danger)]">
+              {t("chat.requestFailed")}
+            </div>
+          ) : null}
+          <MarkdownContent
+            content={message.content}
+            className="text-[10.5px] leading-relaxed text-[var(--muted)]"
+          />
           {current && isReviewing(current) ? (
             <button
               className="btn btn-primary mt-2 h-7 w-full text-[9px]"
               onClick={() => setReviewOpen(true)}
             >
               <ShieldCheck size={11} />
-              Review architecture diff
+              {t("chat.reviewDiff")}
               <ArrowRight size={10} className="ml-auto" />
             </button>
           ) : null}
           {message.details ? (
             <details className="message-details">
-              <summary>Implementation & verification details</summary>
+              <summary>{t("chat.details")}</summary>
               <pre>{message.details}</pre>
             </details>
           ) : null}
@@ -110,11 +115,11 @@ function ChatBubble({ message }: { message: ChatMessage }) {
             isUser ? "justify-end" : ""
           }`}
         >
-          <span>{message.role}</span>
+          <span>{ROLE_KEYS[message.role] ? t(ROLE_KEYS[message.role]) : message.role}</span>
           <span>·</span>
           <span>{formatTime(message.createdAt)}</span>
           {message.proposalId && !current && isReviewing(proposal) === false ? (
-            <span>· historical</span>
+            <span>· {t("chat.historical")}</span>
           ) : null}
         </div>
       </div>
@@ -122,14 +127,44 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-function AgentActivity() {
+function StreamBubble() {
+  const t = useT();
+  const stream = useJin((state) => state.stream);
+  if (!stream) return null;
+  return (
+    <div className="fade-in flex gap-2">
+      <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--accent-soft)]">
+        <Bot size={12} className="text-[var(--accent)]" />
+      </div>
+      <div className="min-w-0 max-w-[calc(100%-28px)]">
+        <div className="rounded-xl border border-[var(--accent)]/25 bg-[var(--panel-soft)] px-2.5 py-2">
+          <div className="flex items-center gap-1.5 text-[8px] font-semibold uppercase tracking-wide text-[var(--faint)]">
+            {stream.phase === "thinking" ? (
+              <Spinner size={8} className="text-[var(--accent)]" />
+            ) : (
+              <span className="status-dot success" />
+            )}
+            <span className="truncate">{stream.label}</span>
+          </div>
+          <div className="mt-1 break-words text-[10.5px] leading-relaxed text-[var(--muted)]">
+            <MarkdownContent content={stream.content || t("chat.streamWaiting")} />
+            <span className="stream-caret" aria-hidden="true" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
+  const t = useT();
   const agent = useJin((state) => state.app?.agent);
   const cancelAgent = useJin((state) => state.cancelAgent);
-  if (!agent || agent.phase === "idle") return null;
+  if (!agent || agent.phase === "idle" || (agent.phase === "error" && suppressError)) {
+    return null;
+  }
   const working =
-    agent.phase === "planning" ||
-    agent.phase === "implementing" ||
-    agent.phase === "verifying";
+    agent.phase === "planning" || agent.phase === "implementing" || agent.phase === "verifying";
   return (
     <div className="fade-in flex gap-2 px-1">
       <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--panel-soft)]">
@@ -150,22 +185,20 @@ function AgentActivity() {
           <div className="min-w-0 flex-1">
             <div className="text-[10px] font-semibold">
               {agent.phase === "planning"
-                ? "Planning the turn"
+                ? t("chat.planning")
                 : agent.phase === "implementing"
-                  ? "Implementing approved architecture"
+                  ? t("chat.implementing")
                   : agent.phase === "verifying"
-                    ? "Verifying conformance"
-                    : "Agent error"}
+                    ? t("chat.verifying")
+                    : t("chat.agentError")}
             </div>
-            <div className="mt-0.5 truncate text-[9px] text-[var(--muted)]">
-              {agent.message}
-            </div>
+            <div className="mt-0.5 truncate text-[9px] text-[var(--muted)]">{agent.message}</div>
           </div>
           {working ? (
             <button
               className="icon-btn h-6 w-6 shrink-0"
               onClick={() => void cancelAgent()}
-              title="Cancel agent"
+              title={t("chat.cancelAgent")}
             >
               <Square size={10} />
             </button>
@@ -178,7 +211,7 @@ function AgentActivity() {
               <span />
               <span />
             </span>
-            The architecture, code, and verification stay in one turn.
+            {t("chat.keepTurn")}
           </div>
         ) : null}
       </div>
@@ -187,25 +220,27 @@ function AgentActivity() {
 }
 
 export function ChatPanel() {
+  const t = useT();
   const app = useJin((state) => state.app);
   const busy = useJin((state) => state.busy);
   const sendMessage = useJin((state) => state.sendMessage);
-  const [text, setText] = useState("");
+  const openSettings = useJin((state) => state.openSettings);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const messages = app?.messages ?? [];
+  const stream = useJin((state) => state.stream);
   const agent = app?.agent;
   const proposal = app?.proposal ?? null;
   const reviewing = isReviewing(proposal);
   const working =
-    agent?.phase === "planning" ||
-    agent?.phase === "implementing" ||
-    agent?.phase === "verifying";
-  const configured =
-    app?.settings.provider.kind === "ollama" ||
-    (app?.settings.provider.kind === "openai-compatible" &&
-      app.settings.provider.hasApiKey);
-  const disabled = !app?.project || Boolean(busy) || working || reviewing;
+    agent?.phase === "planning" || agent?.phase === "implementing" || agent?.phase === "verifying";
+  const configured = isProviderConfigured(app?.settings.provider);
+  const latestMessage = messages[messages.length - 1];
+  const errorAlreadyShown =
+    agent?.phase === "error" &&
+    latestMessage?.kind === "error" &&
+    latestMessage.content.includes(agent.message);
+  const disabled = !app?.project || Boolean(busy) || working || reviewing || !configured;
 
   useEffect(() => {
     if (!stickToBottom.current) return;
@@ -214,12 +249,10 @@ export function ChatPanel() {
       if (container) container.scrollTop = container.scrollHeight;
     }, 30);
     return () => window.clearTimeout(timer);
-  }, [messages.length, agent?.phase, agent?.message]);
+  }, [messages.length, agent?.phase, agent?.message, stream?.content.length, stream?.label]);
 
-  const submit = (): void => {
-    const request = text.trim();
+  const submit = (request: string): void => {
     if (!request || disabled) return;
-    setText("");
     stickToBottom.current = true;
     void sendMessage(request);
   };
@@ -228,7 +261,7 @@ export function ChatPanel() {
     <aside className="glass flex w-[342px] shrink-0 flex-col overflow-hidden border-y-0 border-r-0 xl:w-[372px] max-[1080px]:w-[310px]">
       <div className="flex h-[39px] shrink-0 items-center gap-2 border-b border-[var(--border)] px-3">
         <MessageSquare size={13} className="text-[var(--violet)]" />
-        <span className="text-[11px] font-bold">Chat</span>
+        <span className="text-[11px] font-bold">{t("chat.title")}</span>
         <span className="chip ml-auto h-[19px] gap-1 px-1.5 text-[8px]">
           {working ? (
             <Spinner size={8} />
@@ -238,12 +271,16 @@ export function ChatPanel() {
             />
           )}
           {working
-            ? agent?.phase
+            ? agent?.phase === "planning"
+              ? t("chat.planning")
+              : agent?.phase === "implementing"
+                ? t("chat.implementing")
+                : t("chat.verifying")
             : agent?.phase === "error"
-              ? "error"
+              ? t("chat.error")
               : configured
-                ? "agent ready"
-                : "local planner"}
+                ? t("chat.agentReady")
+                : t("chat.providerRequiredShort")}
         </span>
       </div>
 
@@ -261,73 +298,40 @@ export function ChatPanel() {
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--accent-soft)] text-[var(--accent)]">
               <Sparkles size={20} />
             </div>
-            <div className="mt-3 text-[11px] font-bold">Architecture is the interface</div>
+            <div className="mt-3 text-[11px] font-bold">{t("chat.emptyTitle")}</div>
             <p className="mt-1 max-w-[220px] text-[9.5px] leading-relaxed text-[var(--faint)]">
-              Ask for a change. Jin proposes Intent and architecture first; approval unlocks code.
+              {configured ? t("chat.emptyDetail") : t("chat.emptyDetailNoProvider")}
             </p>
           </div>
         ) : (
           messages.map((message) => <ChatBubble key={message.id} message={message} />)
         )}
-        <AgentActivity />
+        <StreamBubble />
+        <AgentActivity suppressError={errorAlreadyShown} />
       </div>
 
       <div className="shrink-0 border-t border-[var(--border)] p-2.5">
         {reviewing ? (
           <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-amber-300/20 bg-amber-300/[0.05] px-2 py-1.5 text-[8.5px] leading-relaxed text-[var(--muted)]">
             <ShieldCheck size={10} className="mt-0.5 shrink-0 text-[var(--warning)]" />
-            Approve or reject {ordinalLabel(nextOrdinal(app?.snapshot))} before starting another
-            turn.
+            {t("chat.reviewPrompt", {
+              ordinal: ordinalLabel(nextOrdinal(app?.snapshot)),
+            })}
           </div>
         ) : null}
         {!configured ? (
-          <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] px-2 py-1.5 text-[8.5px] leading-relaxed text-[var(--faint)]">
+          <div className="mb-2 flex items-start gap-2 rounded-lg border border-amber-300/20 bg-amber-300/[0.05] px-2 py-1.5 text-[8.5px] leading-relaxed text-[var(--muted)]">
             <Sparkles size={10} className="mt-0.5 shrink-0 text-[var(--warning)]" />
-            Local planning is active. Configure an AI provider in Settings for code implementation.
-          </div>
-        ) : null}
-        <div
-          className={`rounded-xl border bg-[var(--control)] p-1.5 transition-colors ${
-            disabled
-              ? "border-[var(--border)] opacity-65"
-              : "border-[var(--border)] focus-within:border-cyan-300/40"
-          }`}
-        >
-          <textarea
-            className="max-h-[150px] min-h-[54px] w-full resize-none border-0 bg-transparent px-1.5 py-1 text-[10.5px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--faint)]"
-            placeholder={
-              reviewing
-                ? "Resolve the current architecture review first…"
-                : working
-                  ? "Jin is working…"
-                  : app?.project
-                    ? "Describe an Intent, change, or refactor…"
-                    : "Open a project first…"
-            }
-            value={text}
-            disabled={disabled}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                submit();
-              }
-            }}
-          />
-          <div className="flex items-center gap-1.5 px-1 pt-0.5">
-            <CornerDownLeft size={9} className="text-[var(--faint)]" />
-            <span className="text-[8px] text-[var(--faint)]">Enter to send · Shift+Enter newline</span>
+            <span className="min-w-0 flex-1">{t("chat.providerRequired")}</span>
             <button
-              className="btn btn-primary ml-auto h-7 w-7 p-0"
-              disabled={disabled || !text.trim()}
-              onClick={submit}
-              title="Send"
-              aria-label="Send message"
+              className="btn h-6 shrink-0 px-2 text-[8px]"
+              onClick={() => openSettings("provider")}
             >
-              {busy === "Thinking…" ? <Spinner size={12} /> : <Send size={12} />}
+              {t("chat.configureProvider")}
             </button>
           </div>
-        </div>
+        ) : null}
+        <ChatComposer disabled={disabled} reviewing={reviewing} working={working} onSend={submit} />
       </div>
     </aside>
   );

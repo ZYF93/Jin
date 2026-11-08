@@ -3,6 +3,8 @@ import { join } from "node:path";
 import type { ArchSnapshot } from "../../../shared/arch/types";
 import type { ReuseCandidate, ReusePlan } from "../../../shared/ipc";
 import type { ScanResult, ScannedFile } from "../scan/scanner";
+import { RagStore, type PersistedRagDoc } from "./rag-store";
+import { cosine, tokenMap, tokenize, vectorize } from "./tokens";
 
 interface RagDoc {
   path: string;
@@ -10,30 +12,13 @@ interface RagDoc {
   symbols: string;
   responsibility: string;
   text: string;
+  nodeId: string | null;
   tokens: Map<string, number>;
+  vector: Float32Array;
   architectureText: string;
 }
 
 const MAX_DOC_CHARS = 160_000;
-
-function tokenize(value: string): string[] {
-  const lower = value.toLowerCase();
-  const latin = lower.match(/[a-z_$][a-z0-9_$.-]*/g) ?? [];
-  const cjk = lower.match(/[\u3400-\u9fff]/g) ?? [];
-  const cjkBigrams: string[] = [];
-  for (let index = 0; index < cjk.length - 1; index += 1) {
-    cjkBigrams.push(`${cjk[index]}${cjk[index + 1]}`);
-  }
-  return [...latin, ...cjk, ...cjkBigrams].filter((term) => term.length > 1);
-}
-
-function tokenMap(value: string): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const token of tokenize(value)) {
-    map.set(token, (map.get(token) ?? 0) + 1);
-  }
-  return map;
-}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -52,55 +37,159 @@ function snippetFor(text: string, query: string): string {
   }
   const start = Math.max(0, text.lastIndexOf("\n", Math.max(0, position - 300)) + 1);
   const end = text.indexOf("\n", Math.min(text.length, position + 700));
-  return text.slice(start, end < 0 ? Math.min(text.length, start + 1000) : end).trim().slice(0, 800);
+  return text
+    .slice(start, end < 0 ? Math.min(text.length, start + 1000) : end)
+    .trim()
+    .slice(0, 800);
 }
 
 /**
  * Lightweight code reuse retrieval.
  *
- * It uses an in-memory BM25-like keyword score over the scanned source and the
- * approved architecture's responsibility text. The project index already owns
- * the authoritative FTS table for nodes; this service is intentionally a pure,
- * rebuildable cache for the agent's ReusePlan and costs no extra IPC.
+ * It combines a BM25-like keyword score, a deterministic feature-hashed dense
+ * vector, an FTS5 candidate prefilter and one-hop architecture graph expansion.
+ * The in-memory view is a cache; `RagStore` mirrors it into `.jin/cache` so a
+ * restart can answer before the next scan completes.
  */
 export class RagService {
   private docs: RagDoc[] = [];
   private updatedAt: string | null = null;
+  private readonly store: RagStore | null;
+  private hydrated = false;
+  private pathToNodeId = new Map<string, string>();
+  private neighbors = new Map<string, Set<string>>();
+
+  constructor(store: RagStore | null = null) {
+    this.store = store;
+  }
+
+  hydrate(): void {
+    if (this.hydrated || this.docs.length > 0 || !this.store) {
+      this.hydrated = true;
+      return;
+    }
+    try {
+      const persisted = this.store.loadAll();
+      this.docs = persisted.map((doc) => ({
+        path: doc.path,
+        title: doc.title,
+        symbols: doc.symbols,
+        responsibility: doc.responsibility,
+        text: doc.text,
+        nodeId: doc.nodeId,
+        tokens: tokenMap(
+          `${doc.path}\n${doc.title}\n${doc.symbols}\n${doc.responsibility}\n${doc.text}`,
+        ),
+        vector: doc.vector,
+        architectureText: "",
+      }));
+      this.pathToNodeId = new Map(
+        persisted
+          .filter((doc): doc is PersistedRagDoc & { nodeId: string } => Boolean(doc.nodeId))
+          .map((doc) => [doc.path, doc.nodeId]),
+      );
+      this.updatedAt = new Date().toISOString();
+    } catch {
+      this.docs = [];
+    }
+    this.hydrated = true;
+  }
 
   update(root: string, scan: ScanResult, snapshot: ArchSnapshot | null): void {
+    const fileToNode = new Map<string, ArchSnapshot["nodes"][string]>();
+    if (snapshot) {
+      for (const node of Object.values(snapshot.nodes)) {
+        if (node.file && !fileToNode.has(node.file)) fileToNode.set(node.file, node);
+      }
+    }
+
+    this.pathToNodeId = new Map();
+    this.neighbors = new Map();
+    if (snapshot) {
+      const link = (left: string, right: string): void => {
+        const leftSet = this.neighbors.get(left) ?? new Set<string>();
+        leftSet.add(right);
+        this.neighbors.set(left, leftSet);
+        const rightSet = this.neighbors.get(right) ?? new Set<string>();
+        rightSet.add(left);
+        this.neighbors.set(right, rightSet);
+      };
+      for (const edge of Object.values(snapshot.edges)) link(edge.from, edge.to);
+      for (const node of Object.values(snapshot.nodes)) {
+        if (node.parentId) link(node.id, node.parentId);
+      }
+      for (const [file, node] of fileToNode) this.pathToNodeId.set(file, node.id);
+    }
+
+    const now = new Date().toISOString();
     this.docs = scan.files.map((file) => {
-      const node = snapshot
-        ? Object.values(snapshot.nodes).find((candidate) => candidate.file === file.path)
-        : null;
+      const node = fileToNode.get(file.path) ?? null;
       let text = "";
       try {
         text = readFileSync(join(root, file.path), "utf8").slice(0, MAX_DOC_CHARS);
       } catch {
         text = "";
       }
-      const architectureText = node
-        ? `${node.name}\n${node.responsibility}\n${JSON.stringify(node.metadata)}`
-        : "";
+      const architectureParts: string[] = [];
+      if (node) {
+        architectureParts.push(node.name, node.responsibility);
+        const metadata = JSON.stringify(node.metadata);
+        if (metadata && metadata !== "{}") architectureParts.push(metadata);
+        let parent = node.parentId && snapshot ? snapshot.nodes[node.parentId] : null;
+        let depth = 0;
+        while (parent && depth < 3) {
+          architectureParts.push(parent.name, parent.responsibility);
+          parent = parent.parentId && snapshot ? snapshot.nodes[parent.parentId] : null;
+          depth += 1;
+        }
+      }
+      const tokens = tokenMap(
+        `${file.path}\n${file.title}\n${file.exports.join(" ")}\n${file.responsibility}\n${text}`,
+      );
       return {
         path: file.path,
         title: file.title,
         symbols: file.exports.join(", "),
         responsibility: file.responsibility,
         text,
-        tokens: tokenMap(`${file.path}\n${file.title}\n${file.exports.join(" ")}\n${file.responsibility}\n${text}`),
-        architectureText,
+        nodeId: node?.id ?? null,
+        tokens,
+        vector: vectorize(tokens),
+        architectureText: architectureParts.join("\n"),
       };
     });
-    this.updatedAt = new Date().toISOString();
+    this.updatedAt = now;
+    this.hydrated = true;
+    if (this.store) {
+      try {
+        this.store.replaceAll(
+          this.docs.map((doc) => ({
+            path: doc.path,
+            title: doc.title,
+            symbols: doc.symbols,
+            responsibility: doc.responsibility,
+            text: doc.text,
+            nodeId: doc.nodeId,
+            vector: doc.vector,
+            updatedAt: now,
+          })),
+        );
+      } catch {
+        // The durable cache is disposable; scanning and retrieval still work.
+      }
+    }
   }
 
   get size(): number {
+    this.hydrate();
     return this.docs.length;
   }
 
   search(query: string, limit = 8): ReuseCandidate[] {
+    this.hydrate();
     const terms = [...new Set(tokenize(query))];
     if (terms.length === 0) return [];
+    const queryVector = vectorize(tokenMap(query));
     const documentCount = Math.max(1, this.docs.length);
     const averageLength =
       this.docs.reduce((sum, doc) => sum + doc.tokens.size, 0) / documentCount || 1;
@@ -110,28 +199,54 @@ export class RagService {
       for (const doc of this.docs) if (doc.tokens.has(term)) count += 1;
       documentFrequency.set(term, count);
     }
+    const ftsPaths = new Set(this.store?.searchPaths(query, 64) ?? []);
 
     const scored = this.docs.map((doc) => {
-      let score = 0;
+      let lexical = 0;
       for (const term of terms) {
         const frequency = doc.tokens.get(term) ?? 0;
         if (frequency === 0) continue;
         const idf = Math.log(
-          1 + (documentCount - (documentFrequency.get(term) ?? 0) + 0.5) /
-            ((documentFrequency.get(term) ?? 0) + 0.5),
+          1 +
+            (documentCount - (documentFrequency.get(term) ?? 0) + 0.5) /
+              ((documentFrequency.get(term) ?? 0) + 0.5),
         );
         const lengthNorm = 1.2 * (0.25 + (0.75 * doc.tokens.size) / averageLength);
-        score += idf * ((frequency * 2.2) / (frequency + lengthNorm));
-        if (doc.path.toLowerCase().includes(term)) score += 1.4;
-        if (doc.title.toLowerCase().includes(term)) score += 1.1;
-        if (doc.symbols.toLowerCase().includes(term)) score += 0.9;
-        if (doc.architectureText.toLowerCase().includes(term)) score += 0.5;
+        lexical += idf * ((frequency * 2.2) / (frequency + lengthNorm));
+        if (doc.path.toLowerCase().includes(term)) lexical += 1.4;
+        if (doc.title.toLowerCase().includes(term)) lexical += 1.1;
+        if (doc.symbols.toLowerCase().includes(term)) lexical += 0.9;
+        if (doc.architectureText.toLowerCase().includes(term)) lexical += 0.5;
       }
-      return { doc, score };
+      if (ftsPaths.has(doc.path)) lexical += 0.35;
+      const vectorScore = Math.max(0, cosine(queryVector, doc.vector));
+      return { doc, score: lexical + vectorScore * 2.8 };
     });
 
-    return scored
-      .filter((entry) => entry.score > 0)
+    // One-hop graph expansion: the file that owns a matching concept is often
+    // used by, or grouped under, the file the user actually wants to change.
+    const preliminary = scored.sort((a, b) => b.score - a.score);
+    const seeds = preliminary.filter((entry) => entry.doc.nodeId && entry.score > 0.01).slice(0, 6);
+    const seedIds = new Set(seeds.map((entry) => entry.doc.nodeId).filter(Boolean));
+    const related = new Set<string>();
+    for (const seed of seeds) {
+      if (!seed.doc.nodeId) continue;
+      for (const neighbor of this.neighbors.get(seed.doc.nodeId) ?? []) {
+        if (!seedIds.has(neighbor)) related.add(neighbor);
+      }
+    }
+    const maxSeedScore = preliminary[0]?.score ?? 0;
+    const graphBoost = Math.min(1.4, maxSeedScore * 0.14);
+    const expanded = related.size
+      ? preliminary.map((entry) =>
+          entry.doc.nodeId && related.has(entry.doc.nodeId)
+            ? { ...entry, score: entry.score + graphBoost }
+            : entry,
+        )
+      : preliminary;
+
+    return expanded
+      .filter((entry) => entry.score > 0.01)
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.max(1, Math.min(30, limit)))
       .map(({ doc, score }) => ({
@@ -139,8 +254,7 @@ export class RagService {
         symbol: doc.symbols.slice(0, 180),
         score: Math.round(score * 100) / 100,
         reason:
-          doc.responsibility ||
-          `Matches ${terms.slice(0, 5).join(", ")} in the scanned source.`,
+          doc.responsibility || `Matches ${terms.slice(0, 5).join(", ")} in the scanned source.`,
         snippet: snippetFor(doc.text, query),
       }));
   }
@@ -159,6 +273,7 @@ export class RagService {
   }
 
   filesForPaths(paths: readonly string[]): ScannedFile[] {
+    this.hydrate();
     const wanted = new Set(paths);
     return this.docs
       .filter((doc) => wanted.has(doc.path))
@@ -167,6 +282,7 @@ export class RagService {
         absolute: "",
         language: "",
         lines: doc.text.split("\n").length,
+        symbolLocations: {},
         bytes: doc.text.length,
         imports: [],
         exports: doc.symbols ? doc.symbols.split(", ").filter(Boolean) : [],
@@ -178,6 +294,7 @@ export class RagService {
   }
 
   textForPath(path: string): string | null {
+    this.hydrate();
     return this.docs.find((doc) => doc.path === path)?.text ?? null;
   }
 
@@ -189,3 +306,5 @@ export class RagService {
     return clamp(Math.round(score * 100) / 100, 0, 999);
   }
 }
+
+export { RagStore } from "./rag-store";

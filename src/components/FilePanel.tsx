@@ -13,6 +13,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import type { FileNode } from "../../shared/ipc";
+import { useT } from "../lib/i18n";
 import { highlightCode } from "../lib/highlight";
 import { fileIconTone, formatBytes } from "../lib/utils";
 import { useJin } from "../state/useJin";
@@ -107,12 +108,15 @@ function TreeNode({
 }
 
 function FileViewer() {
+  const t = useT();
   const selectedFile = useJin((state) => state.selectedFile);
+  const selectedLine = useJin((state) => state.selectedLine);
   const fileContent = useJin((state) => state.fileContent);
   const fileLoading = useJin((state) => state.fileLoading);
   const fileError = useJin((state) => state.fileError);
   const openFile = useJin((state) => state.openFile);
   const notify = useJin((state) => state.notify);
+  const codeViewRef = useRef<HTMLDivElement>(null);
   const [html, setHtml] = useState("");
   const [highlighting, setHighlighting] = useState(false);
 
@@ -139,6 +143,17 @@ function FileViewer() {
     };
   }, [fileContent]);
 
+  useEffect(() => {
+    if (!selectedLine || !html || highlighting) return;
+    const line = codeViewRef.current?.querySelectorAll<HTMLElement>(".line").item(selectedLine - 1);
+    const container = codeViewRef.current;
+    if (!line || !container) return;
+    line.classList.add("source-line-active");
+    const lineTop = line.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    container.scrollTop += lineTop - (container.clientHeight - line.clientHeight) / 2;
+    return () => line.classList.remove("source-line-active");
+  }, [selectedLine, html, highlighting]);
+
   const openExternal = async (): Promise<void> => {
     if (!fileContent) return;
     try {
@@ -154,11 +169,9 @@ function FileViewer() {
         <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--panel-soft)] text-[var(--faint)]">
           <FileCode2 size={20} />
         </div>
-        <div className="mt-3 text-[11px] font-semibold text-[var(--muted)]">
-          Select a file to inspect
-        </div>
+        <div className="mt-3 text-[11px] font-semibold text-[var(--muted)]">{t("file.select")}</div>
         <div className="mt-1 text-[9.5px] leading-relaxed text-[var(--faint)]">
-          The viewer is read-only. Use the external editor button to make changes.
+          {t("file.viewerReadOnly")}
         </div>
       </div>
     );
@@ -168,7 +181,7 @@ function FileViewer() {
     return (
       <div className="flex flex-1 items-center justify-center gap-2 text-[var(--muted)]">
         <Spinner size={14} />
-        <span className="text-[10px]">Reading file…</span>
+        <span className="text-[10px]">{t("file.reading")}</span>
       </div>
     );
   }
@@ -176,12 +189,12 @@ function FileViewer() {
   if (fileError) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center px-5 text-center">
-        <div className="text-[11px] font-semibold text-[var(--danger)]">Could not read file</div>
+        <div className="text-[11px] font-semibold text-[var(--danger)]">{t("file.readError")}</div>
         <div className="mt-1 max-w-[280px] text-[9.5px] leading-relaxed text-[var(--muted)]">
           {fileError}
         </div>
         <button className="btn mt-3 h-7 text-[9px]" onClick={() => void openFile(selectedFile)}>
-          <RotateCcw size={10} /> Retry
+          <RotateCcw size={10} /> {t("file.retry")}
         </button>
       </div>
     );
@@ -193,23 +206,28 @@ function FileViewer() {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] px-2.5 py-2">
         <div className="min-w-0 flex-1">
-          <div className="font-mono-ui truncate text-[9.5px] font-semibold" title={fileContent.path}>
+          <div
+            className="font-mono-ui truncate text-[9.5px] font-semibold"
+            title={fileContent.path}
+          >
             {fileContent.path}
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[8px] text-[var(--faint)]">
             <span>{fileContent.language}</span>
             <span>·</span>
             <span>{formatBytes(fileContent.size)}</span>
-            {fileContent.truncated ? <span className="text-[var(--warning)]">· truncated</span> : null}
+            {fileContent.truncated ? (
+              <span className="text-[var(--warning)]">· {t("file.truncated")}</span>
+            ) : null}
           </div>
         </div>
         <span className="chip h-[18px] gap-1 px-1.5 text-[8px]">
-          <Lock size={8} /> read-only
+          <Lock size={8} /> {t("file.readOnly")}
         </span>
         <button
           className="icon-btn h-7 w-7"
-          title="Open in external editor"
-          aria-label="Open in external editor"
+          title={t("file.openExternal")}
+          aria-label={t("file.openExternal")}
           onClick={() => void openExternal()}
         >
           <ExternalLink size={13} />
@@ -218,12 +236,12 @@ function FileViewer() {
       {highlighting ? (
         <div className="flex flex-1 items-center justify-center gap-2 text-[var(--muted)]">
           <Spinner size={13} />
-          <span className="text-[9.5px]">Highlighting…</span>
+          <span className="text-[9.5px]">{t("file.highlighting")}</span>
         </div>
       ) : html ? (
-        <div className="code-view" dangerouslySetInnerHTML={{ __html: html }} />
+        <div ref={codeViewRef} className="code-view" dangerouslySetInnerHTML={{ __html: html }} />
       ) : (
-        <div className="code-view">
+        <div ref={codeViewRef} className="code-view">
           <pre>
             <code>{fileContent.content}</code>
           </pre>
@@ -231,7 +249,7 @@ function FileViewer() {
       )}
       <div className="flex shrink-0 items-center gap-1.5 border-t border-[var(--border)] px-2.5 py-1.5 text-[8px] text-[var(--faint)]">
         <span className="status-dot success" />
-        external edits require a rescan
+        {t("file.externalEdits")}
         <span className="ml-auto font-mono-ui">utf-8</span>
       </div>
     </div>
@@ -239,6 +257,7 @@ function FileViewer() {
 }
 
 export function FilePanel() {
+  const t = useT();
   const tree = useJin((state) => state.fileTree);
   const loading = useJin((state) => state.fileTreeLoading);
   const selectedFile = useJin((state) => state.selectedFile);
@@ -283,14 +302,14 @@ export function FilePanel() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--border)] px-2.5 py-1.5">
-        <span className="panel-title">Explorer</span>
-        <span className="chip h-[18px] px-1.5 text-[8px]">read-only</span>
+        <span className="panel-title">{t("file.explorer")}</span>
+        <span className="chip h-[18px] px-1.5 text-[8px]">{t("file.readOnly")}</span>
         <button
           className="icon-btn ml-auto h-7 w-7"
           onClick={() => void loadFileTree()}
           disabled={loading}
-          title="Refresh file tree"
-          aria-label="Refresh file tree"
+          title={t("file.refreshTree")}
+          aria-label={t("file.refreshTree")}
         >
           {loading ? <Spinner size={12} /> : <RefreshCw size={12} />}
         </button>
@@ -298,11 +317,11 @@ export function FilePanel() {
       <div className="min-h-[120px] max-h-[43%] shrink-0 overflow-auto border-b border-[var(--border)] py-1">
         {loading && !tree ? (
           <div className="flex h-24 items-center justify-center gap-2 text-[var(--faint)]">
-            <Spinner size={13} /> <span className="text-[9.5px]">Loading tree…</span>
+            <Spinner size={13} /> <span className="text-[9.5px]">{t("file.loadingTree")}</span>
           </div>
         ) : roots.length === 0 ? (
           <div className="px-4 py-8 text-center text-[9.5px] text-[var(--faint)]">
-            No readable project files.
+            {t("file.noFiles")}
           </div>
         ) : (
           roots.map((entry) => (

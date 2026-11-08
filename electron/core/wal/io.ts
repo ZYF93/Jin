@@ -55,14 +55,26 @@ export function loadWal(path: string): WalParseResult {
  * merge drivers are the only writers allowed to rewrite the file.
  */
 export function appendRecord(path: string, record: WalRecord): void {
-  const issues = validateRecord(record);
-  if (issues.length > 0) {
-    throw new Error(`Refusing to append invalid WAL record: ${issues.join("; ")}`);
+  appendRecords(path, [record]);
+}
+
+/**
+ * Append a batch with one fsync. An approval can contain thousands of op
+ * records; fsyncing each one turns a large import into a multi-minute freeze.
+ * Validate the whole batch first so a bad record cannot leave a partial append.
+ */
+export function appendRecords(path: string, records: readonly WalRecord[]): void {
+  if (records.length === 0) return;
+  for (const record of records) {
+    const issues = validateRecord(record);
+    if (issues.length > 0) {
+      throw new Error(`Refusing to append invalid WAL record: ${issues.join("; ")}`);
+    }
   }
   mkdirSync(dirname(path), { recursive: true });
   const fd = openSync(path, "a", 0o644);
   try {
-    writeSync(fd, `${serializeRecord(record)}\n`);
+    writeSync(fd, serializeWal(records));
     fsyncSync(fd);
   } finally {
     closeSync(fd);

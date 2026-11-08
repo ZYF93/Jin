@@ -5,10 +5,12 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
+import { useT } from "../lib/i18n";
 import { isReviewing, nextOrdinal, ordinalLabel } from "../lib/utils";
 import { useJin } from "../state/useJin";
 
 export function ReviewBar() {
+  const t = useT();
   const proposal = useJin((state) => state.app?.proposal ?? null);
   const snapshot = useJin((state) => state.app?.snapshot);
   const setReviewOpen = useJin((state) => state.setReviewOpen);
@@ -37,7 +39,7 @@ export function ReviewBar() {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-bold">
-            {stale ? "Architecture changed during review" : "One approval required"}
+            {stale ? t("reviewbar.staleTitle") : t("reviewbar.oneApproval")}
           </span>
           <span className="font-mono-ui text-[9px] text-[var(--faint)]">
             {ordinalLabel(nextOrdinal(snapshot))}
@@ -52,20 +54,26 @@ export function ReviewBar() {
           <span className="text-[var(--warning)]">~{modified}</span>
           <span>·</span>
           <span>
-            {proposal.risks.length} risk{proposal.risks.length === 1 ? "" : "s"}
+            {t("reviewbar.risks", {
+              count: proposal.risks.length,
+              display: proposal.risks.length,
+            })}
           </span>
           {proposal.reusePlan ? (
             <>
               <span>·</span>
-              <span>{proposal.reusePlan.candidates.length} reuse candidates</span>
+              <span>
+                {t("reviewbar.reuse", {
+                  count: proposal.reusePlan.candidates.length,
+                  display: proposal.reusePlan.candidates.length,
+                })}
+              </span>
             </>
           ) : null}
           {stale ? (
             <>
               <span>·</span>
-              <span className="text-[var(--danger)]">
-                Reject this version, then rescan to continue.
-              </span>
+              <span className="text-[var(--danger)]">{t("reviewbar.staleNote")}</span>
             </>
           ) : null}
         </div>
@@ -76,14 +84,14 @@ export function ReviewBar() {
         onClick={() => void rejectProposal()}
       >
         <X size={11} />
-        Reject
+        {t("common.reject")}
       </button>
       <button
         className="btn btn-primary h-7 px-2.5 text-[9px]"
         onClick={() => setReviewOpen(true)}
       >
-        {stale ? <ShieldCheck size={11} /> : <ShieldCheck size={11} />}
-        Review
+        <ShieldCheck size={11} />
+        {t("common.review")}
         <ArrowRight size={11} />
       </button>
     </div>

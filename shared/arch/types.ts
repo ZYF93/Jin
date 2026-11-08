@@ -27,6 +27,7 @@ export type L1Kind =
   | "route"
   | "store"
   | "type"
+  | "module"
   | "function"
   | "table"
   | "schema"
@@ -64,10 +65,7 @@ export interface ArchNode {
 }
 
 /** A node before it is materialized into a snapshot. */
-export type ArchNodeDraft = Omit<
-  ArchNode,
-  "introducedIn" | "updatedIn" | "lastTouchedIn"
->;
+export type ArchNodeDraft = Omit<ArchNode, "introducedIn" | "updatedIn" | "lastTouchedIn">;
 
 export type EdgeKind =
   | "contains"
@@ -118,6 +116,16 @@ export interface Intent {
   nodeIntents: NodeIntent[];
   author: Actor;
   createdAt: string;
+  /**
+   * Scan syncs, imports and drift amendments change architecture only: their
+   * approval never starts a code turn. Absent means "code" for old records.
+   */
+  mode?: "architecture" | "code";
+  /**
+   * Conflicted version ids reconciled by this merge intent. Once approved, the
+   * original conflicts stay in the ledger but are no longer shown as open.
+   */
+  resolves?: string[];
 }
 
 export interface Touch {
@@ -169,8 +177,10 @@ export interface ImplementationCheck {
 }
 
 export interface ConformanceResult {
-  /** Op record id this result verifies. */
+  /** Op record id this result verifies, or the drift sentinel. */
   opId: string;
+  /** Optional for records written before this field existed. */
+  kind?: "op" | "drift";
   status: "pass" | "fail";
   evidence: string[];
 }
@@ -265,6 +275,8 @@ export interface WalConflict {
   message: string;
   recordIds: string[];
   nodeId?: string;
+  /** Version whose application produced this conflict, when known. */
+  versionId?: string;
 }
 
 export interface FoldResult {
