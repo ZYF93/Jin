@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Architecture-first desktop coding agent",
-  "author": "Jin contributors",
+  "author": "张一凡 <344275632@qq.com>",
   "license": "UNLICENSED",
   "main": "dist-electron/main.js",
   "scripts": {
