@@ -142,6 +142,7 @@ jobs:
         with:
           pattern: jin-*
           path: release-assets
+          flatten: true
           merge-multiple: true
 
       - name: Create release and upload installers
