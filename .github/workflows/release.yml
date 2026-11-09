@@ -142,7 +142,6 @@ jobs:
         with:
           pattern: jin-*
           path: release-assets
-          flatten: true
           merge-multiple: true
 
       - name: Create release and upload installers
@@ -150,8 +149,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          shopt -s nullglob
-          assets=(release-assets/*)
+          mapfile -d '' -t assets < <(find release-assets -type f -print0)
           if (( ${#assets[@]} == 0 )); then
             echo "No installer artifacts were downloaded." >&2
             exit 1
