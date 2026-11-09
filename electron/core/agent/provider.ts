@@ -460,16 +460,48 @@ export async function completeJson(
   user: string,
   options: CompletionOptions = {},
 ): Promise<Record<string, unknown>> {
-  const text = await request(
-    config,
-    [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-    { ...options, json: true },
-    true,
-  );
-  return parseJsonObject(text);
+  const messages = [
+    { role: "system" as const, content: system },
+    { role: "user" as const, content: user },
+  ];
+  const text = await request(config, messages, { ...options, json: true }, true);
+  try {
+    return parseJsonObject(text);
+  } catch (initialError) {
+    if (options.signal?.aborted) throw initialError;
+
+    // Some OpenAI-compatible models ignore JSON mode or prepend internal
+    // channel/turn labels. Give the same model one chance to repair the exact
+    // response. Do not stream the repair into an already-rendered first pass.
+    const invalidResponse = text.slice(0, 12_000);
+    try {
+      const repaired = await request(
+        config,
+        [
+          ...messages,
+          { role: "assistant", content: invalidResponse },
+          {
+            role: "user",
+            content:
+              "Your previous response was not valid JSON. Return the same answer as exactly one valid JSON object. Do not add a channel label, explanation, Markdown fence, or any text before or after the object. Preserve the original meaning and fields.",
+          },
+        ],
+        { ...options, onDelta: undefined, json: true },
+        true,
+      );
+      return parseJsonObject(repaired);
+    } catch (repairError) {
+      if (options.signal?.aborted) throw repairError;
+      const initialMessage =
+        initialError instanceof Error ? initialError.message : String(initialError);
+      const repairMessage =
+        repairError instanceof Error ? repairError.message : String(repairError);
+      throw new ProviderError(
+        `Model response was invalid and automatic JSON repair failed: ${repairMessage}`,
+        `Initial response error: ${initialMessage}`,
+      );
+    }
+  }
 }
 
 export async function completeText(
@@ -491,23 +523,66 @@ export async function completeText(
 
 export function parseJsonObject(text: string): Record<string, unknown> {
   const trimmed = text.trim();
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced?.[1]?.trim() ?? trimmed;
-  const start = candidate.indexOf("{");
-  const end = candidate.lastIndexOf("}");
-  if (start < 0 || end <= start) {
+  const fenced: string[] = [];
+  for (const match of trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+    if (match[1]) fenced.push(match[1].trim());
+  }
+
+  const parseCandidates = (source: string): string[] => {
+    const candidates: string[] = [];
+    for (let start = 0; start < source.length; start += 1) {
+      if (source[start] !== "{") continue;
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let end = start; end < source.length; end += 1) {
+        const char = source[end];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (char === "\\") escaped = true;
+          else if (char === '"') inString = false;
+          continue;
+        }
+        if (char === '"') inString = true;
+        else if (char === "{") depth += 1;
+        else if (char === "}") {
+          depth -= 1;
+          if (depth === 0) {
+            candidates.push(source.slice(start, end + 1));
+            // Skip nested objects so a valid child object cannot accidentally
+            // replace the complete response object.
+            start = end;
+            break;
+          }
+        }
+      }
+    }
+    return candidates;
+  };
+
+  const candidates = [...fenced.flatMap(parseCandidates), ...parseCandidates(trimmed)];
+  let parseError: unknown;
+  let foundJson = false;
+  let result: Record<string, unknown> | undefined;
+  // Prefer the last valid object: models sometimes include an example before
+  // the actual answer, or add a short channel label around the final object.
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      foundJson = true;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        result = parsed as Record<string, unknown>;
+      }
+    } catch (error) {
+      parseError = error;
+    }
+  }
+  if (!foundJson && candidates.length === 0) {
     throw new ProviderError("Model did not return a JSON object");
   }
-  try {
-    const parsed = JSON.parse(candidate.slice(start, end + 1)) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new ProviderError("Model returned JSON that is not an object");
-    }
-    return parsed as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof ProviderError) throw error;
-    throw new ProviderError(
-      `Could not parse model JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  if (result) return result;
+  if (foundJson) throw new ProviderError("Model returned JSON that is not an object");
+  throw new ProviderError(
+    `Could not parse model JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+  );
 }
