@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
-import type { ArchNode, ArchSnapshot, Intent } from "../../../shared/arch/types";
+import type { ArchNode, ArchSnapshot, Intent } from "../../../shared/ledger/types";
 import { emptySnapshot } from "../arch/snapshot";
 import { resilientProviderFetch } from "./provider";
 import {

@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
-import type { WalConflict } from "../../../shared/arch/types";
 import type {
+  WalConflict,
   WalMergeResult,
   WalParseError,
   WalRecord,
-} from "../../../shared/wal/types";
+} from "../../../shared/ledger/types";
 import { foldWal } from "./fold";
 import { orderRecords } from "./order";
 import { parseWalText, serializeWal, writeWalAtomic } from "./io";

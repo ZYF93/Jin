@@ -95,7 +95,6 @@ function defaults(): StoredSettings {
     },
     agent: {
       runtime: "custom",
-      autoImplement: true,
       semanticScan: true,
       temperature: 0.2,
       maxTokens: 8000,
@@ -191,10 +190,6 @@ function normalize(raw: unknown): StoredSettings {
     },
     agent: {
       runtime: agent.runtime === "eko" ? "eko" : fallback.agent.runtime,
-      autoImplement:
-        typeof agent.autoImplement === "boolean"
-          ? agent.autoImplement
-          : fallback.agent.autoImplement,
       semanticScan:
         typeof agent.semanticScan === "boolean"
           ? agent.semanticScan
@@ -373,9 +368,6 @@ export class SettingsStore {
         10_000,
         raw.provider.outputPricePerMillion,
       );
-    }
-    if (typeof patch.autoImplement === "boolean") {
-      raw.agent.autoImplement = patch.autoImplement;
     }
     if (typeof patch.semanticScan === "boolean") {
       raw.agent.semanticScan = patch.semanticScan;

@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
-import type { ArchEdgeDraft, ArchNodeDraft, L1Kind, NodeKind } from "../../../shared/arch/types";
+import type { ArchEdgeDraft, ArchNodeDraft, L1Kind, NodeKind } from "../../../shared/ledger/types";
 import { stableIds } from "../ids/stable";
 import type { JinConfig } from "../project/config";
 

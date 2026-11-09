@@ -1,4 +1,4 @@
-import type { WalRecord } from "../../../shared/wal/types";
+import type { WalRecord } from "../../../shared/ledger/types";
 import type { VersionReplay } from "../../../shared/ipc";
 import { diffSnapshots } from "../arch/diff";
 import { previewOps } from "../arch/preview";

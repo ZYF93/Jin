@@ -4,15 +4,13 @@ import type {
   ImplementationRecord,
   Intent,
   WalConflict,
-} from "../../../shared/arch/types";
-import type {
   DecisionWalRecord,
   ImplementationWalRecord,
   IntentWalRecord,
   OpWalRecord,
   TouchWalRecord,
   WalRecord,
-} from "../../../shared/wal/types";
+} from "../../../shared/ledger/types";
 import {
   applyDecision,
   applyImplementation,

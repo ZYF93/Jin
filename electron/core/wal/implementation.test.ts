@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vite-plus/test";
-import type { ImplementationRecord } from "../../../shared/arch/types";
+import type { ImplementationRecord } from "../../../shared/ledger/types";
 import {
   hasFailedDrift,
   latestImplementation,

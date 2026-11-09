@@ -1,4 +1,4 @@
-import type { L1Kind } from "../../../shared/arch/types";
+import type { L1Kind } from "../../../shared/ledger/types";
 import { isProviderConfigured } from "../../../shared/provider";
 import {
   completeJson,

@@ -1,6 +1,6 @@
 import { MarkerType, Position, type Edge as FlowEdge, type Node as FlowNode } from "@xyflow/react";
 import type { ArchDiff, ChangeKind } from "../../shared/arch/diff";
-import type { ArchEdge, ArchNode } from "../../shared/arch/types";
+import type { ArchEdge, ArchNode } from "../../shared/ledger/types";
 import type { ArchSnapshot, ProposalView } from "../../shared/ipc";
 import { isReviewing } from "./utils";
 

@@ -205,14 +205,11 @@ const en = {
 
   "chat.title": "Chat",
   "chat.agentReady": "agent ready",
-  "chat.localPlanner": "local planner",
   "chat.error": "error",
   "chat.emptyTitle": "Architecture is the interface",
   "chat.emptyDetail":
     "Ask for a change. Jin proposes Intent and architecture first; approval unlocks code.",
   "chat.reviewPrompt": "Approve or reject {ordinal} before starting another turn.",
-  "chat.localNotice":
-    "Local planning is active. Configure an AI provider in Settings for code implementation.",
   "chat.providerRequiredShort": "no provider",
   "chat.providerRequired":
     "No AI provider is configured yet. Add one in Settings to chat, plan, or implement.",
@@ -304,6 +301,13 @@ const en = {
   "review.architectureOnly":
     "One approval applies the WAL bundle. This change is architecture-only, so no code will run.",
   "review.startsImplementation": "One approval applies the WAL bundle and starts implementation.",
+  "approvalFlow.title": "Approval and implementation workflow",
+  "approvalFlow.proposal": "Proposal",
+  "approvalFlow.plan": "Plan",
+  "approvalFlow.approval": "Approval",
+  "approvalFlow.implementation": "Implementation",
+  "approvalFlow.verification": "Verification",
+  "approvalFlow.graphOnly": "Graph update only",
   "review.rejectedHistory": "Rejected versions remain in history and are never applied.",
   "review.notePlaceholder": "Optional review note…",
   "review.approveArchitecture": "Approve architecture",
@@ -438,9 +442,9 @@ const en = {
     "Models are fetched from the provider's compatible model endpoint. You can still type an id manually.",
   "settings.modelsFound": "{count} remote models available. Pick one from the list.",
   "settings.providerDetail":
-    "Jin speaks the OpenAI chat-completions API. Ollama uses the same protocol at a local endpoint. Without a provider, Jin uses its deterministic local planner.",
+    "Jin speaks the OpenAI chat-completions API. Ollama uses the same protocol at a local endpoint. A provider is required for AI planning and implementation.",
   "settings.kind": "Kind",
-  "settings.kind.none": "None (local planner only)",
+  "settings.kind.none": "None (AI unavailable)",
   "settings.kind.openai": "OpenAI-compatible",
   "settings.kind.ollama": "Ollama / local",
   "settings.model": "Model",
@@ -471,9 +475,6 @@ const en = {
   "settings.semanticScan": "Refine scans with the model",
   "settings.semanticScanDetail":
     "The first project scan uses the configured provider to describe file and directory responsibilities. This option also refines later scans; structural facts stay authoritative, and symbol claims are checked against LSP data.",
-  "settings.autoImplement": "Implement automatically after approval",
-  "settings.autoImplementDetail":
-    "Approval always happens first. This only removes a second click between approval and the implementation turn.",
   "settings.temperature": "Temperature",
   "settings.temperatureHint": "Lower is more architectural and predictable.",
   "settings.maxTokens": "Max output tokens",
@@ -612,6 +613,7 @@ const en = {
   "graph.proposalDiff": "{ordinal} proposal diff",
   "graph.overview": "{count} L0 modules · overview",
   "graph.revealed": "{count} L0 modules · L1 revealed",
+  "graph.readOnlyView": "read-only view",
   "graph.legendAdded": "added",
   "graph.legendRemoved": "removed",
   "graph.legendModified": "modified",
@@ -730,6 +732,8 @@ const en = {
     "Architecture approved. This architecture-only change did not run code.",
   "toast.approvedImplementationStarted":
     "Architecture approved. The implementation turn has started.",
+  "toast.approvedImplementationPaused":
+    "Architecture approved. Configure an AI provider to start implementation.",
   "toast.noProposalReject": "There is no proposal to reject.",
   "toast.notRejectable": "This proposal is no longer rejectable.",
   "toast.rejected": "Proposal rejected. It remains in the audit history.",
@@ -850,7 +854,7 @@ const en = {
     "No architecture drift remains after {ordinal}. The approved graph matches the current source facts. {summary}",
   "session.inSync": "Architecture is in sync with source facts. {summary}",
   "session.amendmentReady":
-    "Architecture amendment for {ordinal} is ready for review: {added} added, {updated} updated, {removed} removed. Approving it changes architecture only; no code will be rewritten. {summary}",
+    "Architecture and code repair for {ordinal} is ready for review: {added} added, {updated} updated, {removed} removed. Approval applies the architecture changes and starts implementation against the repaired graph. {summary}",
   "session.importReady":
     "{kind} is ready for review: {added} added, {updated} updated, {removed} removed. {summary}",
   "session.importKindInitial": "Initial architecture import",
@@ -861,6 +865,8 @@ const en = {
     "Approved architecture version {ordinal}. This was an architecture-only change, so no code implementation is needed.",
   "session.approvedVersion": "Approved version {ordinal}. {next}",
   "session.startingImplementation": "Starting implementation.",
+  "session.resumingImplementation":
+    "Resuming the approved implementation for {title} from the WAL checkpoint.",
   "session.implementationPaused":
     "No AI provider is configured, so implementation is paused. Open Settings to configure one.",
   "session.rejected": "Rejected the proposal.",
@@ -904,19 +910,20 @@ const en = {
   "session.syncTitle.import": "Import existing architecture",
   "session.syncTitle.sync": "Sync architecture with source",
   "session.syncGoal.amendment":
-    'Accept the source facts observed after implementing "{title}". {added} additions, {updated} updates, {removed} removals. This amendment changes the architecture only; it does not modify code.',
+    'Repair the architecture drift found after implementing "{title}" and update the source code to conform to the repaired graph. {added} additions, {updated} updates, {removed} removals.',
   "session.syncGoal.import":
     "Import {files} source files into a reviewable L0/L1 architecture. Review the module boundaries and responsibilities before approving.",
   "session.syncGoal.sync":
     "Bring the approved architecture in line with {files} scanned source files. {added} additions, {updated} updates, {removed} removals.",
-  "session.syncTask.amendment": "Review the drift amendment",
+  "session.syncTask.amendment": "Review and implement the drift repair",
   "session.syncTask.import": "Review the initial architecture import",
   "session.syncTask.sync": "Review the source synchronization",
   "session.syncAcceptance.amendment.1":
     "Every added or removed node reflects the current source tree",
   "session.syncAcceptance.amendment.2": "No architecture change is accepted without a graph diff",
   "session.syncAcceptance.amendment.3":
-    "The amended architecture remains the approval surface for future code",
+    "Update source code to conform to the amended architecture",
+  "session.noCodeChanges": "The implementation produced no source file changes.",
   "session.syncAcceptance.import.1": "Every L0 module has a recognizable responsibility",
   "session.syncAcceptance.import.2": "L1 units map to real files",
   "session.syncAcceptance.import.3": "Removals do not delete still-needed architecture",
@@ -1068,39 +1075,6 @@ const en = {
   "verify.reuseCheck": "reuse",
   "verify.languageDiagnostics": "language diagnostics",
 
-  "localPlan.intentOnlyTitle": "Intent-only turn",
-  "localPlan.intentOnlyTask":
-    "Clarify the requested change and implement it within the approved architecture",
-  "localPlan.intentOnlyAcceptance":
-    "The result matches the goal and does not silently change architecture",
-  "localPlan.intentOnlyGeneric":
-    "I prepared an intent-only version. No structural change is proposed, so this review is cheap; approve it to continue and I will use the existing architecture.",
-  "localPlan.intentOnlyQuestion":
-    "I prepared an intent-only version to capture the question. Answering it does not require an architecture change.",
-  "localPlan.intentOnlyUnsafe":
-    "I could not infer a safe structural operation from this request. I prepared an intent-only version; use a more explicit verb (add, remove, rename, responsibility) or configure an AI provider for a semantic plan.",
-  "localPlan.removeTitle": "Remove {name}",
-  "localPlan.removeTask": "Remove {name} and its containment edges",
-  "localPlan.removeAcceptance": "No approved node or edge references the removed unit",
-  "localPlan.removeMessage":
-    "Prepared a removal proposal for {name}. Review its children and dependents before approving.",
-  "localPlan.renameTitle": "Rename {name}",
-  "localPlan.renameTask": "Rename {name} to {to}",
-  "localPlan.renameAcceptance": "The node keeps its stable id and the responsibility is updated",
-  "localPlan.renameMessage": "Prepared a rename of {name} to {to}.",
-  "localPlan.responsibilityTitle": "Update responsibility for {name}",
-  "localPlan.responsibilityTask": "Refine the responsibility of {name}",
-  "localPlan.responsibilityAcceptance": "The new responsibility is specific enough to verify",
-  "localPlan.responsibilityMessage": "Prepared a responsibility update for {name}.",
-  "localPlan.addModuleTitle": "Add module {name}",
-  "localPlan.addUnitTitle": "Add L1 unit {name}",
-  "localPlan.addTask": "Add and implement {name} without duplicating an existing unit",
-  "localPlan.addAcceptanceResponsibility": "The new unit has one clear responsibility",
-  "localPlan.addAcceptanceReuse": "The ReusePlan was considered before writing code",
-  "localPlan.addModuleMessage":
-    "Prepared a module proposal for {name} (L0). The diff is shown before any code is written.",
-  "localPlan.addUnitMessage":
-    "Prepared a {kind} proposal for {name} (L1). The diff is shown before any code is written.",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1298,12 +1272,10 @@ const zh: Record<MessageKey, string> = {
 
   "chat.title": "聊天",
   "chat.agentReady": "Agent 就绪",
-  "chat.localPlanner": "本地规划器",
   "chat.error": "错误",
   "chat.emptyTitle": "架构就是界面",
   "chat.emptyDetail": "提出一个变更。Jin 会先给出意图与架构，批准之后才解锁代码。",
   "chat.reviewPrompt": "开始下一轮之前，请先批准或拒绝 {ordinal}。",
-  "chat.localNotice": "当前使用本地规划。请在设置中配置 AI Provider 以启用代码实现。",
   "chat.providerRequiredShort": "未配置 Provider",
   "chat.providerRequired": "尚未配置 AI Provider。请在设置中添加一个，以便聊天、规划或实现。",
   "chat.configureProvider": "去配置",
@@ -1384,6 +1356,13 @@ const zh: Record<MessageKey, string> = {
   "review.binds": "批准会通过 {hash} 绑定意图、架构操作与 touch。此决定不包含代码差异。",
   "review.architectureOnly": "一次批准会应用 WAL 包。此变更仅涉及架构，不会运行代码。",
   "review.startsImplementation": "一次批准会应用 WAL 包并开始实现。",
+  "approvalFlow.title": "审批与实现流程",
+  "approvalFlow.proposal": "提案",
+  "approvalFlow.plan": "规划",
+  "approvalFlow.approval": "审批",
+  "approvalFlow.implementation": "实现",
+  "approvalFlow.verification": "验证",
+  "approvalFlow.graphOnly": "仅更新架构图",
   "review.rejectedHistory": "被拒绝的版本会保留在历史中，且永远不会被应用。",
   "review.notePlaceholder": "可选的审阅备注…",
   "review.approveArchitecture": "批准架构",
@@ -1509,9 +1488,9 @@ const zh: Record<MessageKey, string> = {
   "settings.modelsHint": "模型会从 Provider 的兼容模型端点自动拉取；也可以手动输入模型 ID。",
   "settings.modelsFound": "已获取 {count} 个远端模型，可从列表中选择。",
   "settings.providerDetail":
-    "Jin 使用 OpenAI Chat Completions API。Ollama 在本地端点使用同一协议。未配置 Provider 时，Jin 使用确定性的本地规划器。",
+    "Jin 使用 OpenAI Chat Completions API。Ollama 在本地端点使用同一协议。AI 规划和实现需要配置 Provider。",
   "settings.kind": "类型",
-  "settings.kind.none": "无（仅本地规划器）",
+  "settings.kind.none": "无（AI 不可用）",
   "settings.kind.openai": "OpenAI 兼容",
   "settings.kind.ollama": "Ollama / 本地",
   "settings.model": "模型",
@@ -1539,8 +1518,6 @@ const zh: Record<MessageKey, string> = {
   "settings.semanticScan": "用模型细化扫描",
   "settings.semanticScanDetail":
     "首次扫描会使用已配置的 Provider 描述文件与目录职责。开启此项后后续扫描也会细化；结构事实保持权威，符号声明会与 LSP 数据核对。",
-  "settings.autoImplement": "批准后自动实现",
-  "settings.autoImplementDetail": "批准始终在前。此选项只省去批准与实现之间的一次点击。",
   "settings.temperature": "温度",
   "settings.temperatureHint": "越低越稳定、越偏架构。",
   "settings.maxTokens": "最大输出 Token",
@@ -1670,6 +1647,7 @@ const zh: Record<MessageKey, string> = {
   "graph.proposalDiff": "{ordinal} 提案差异",
   "graph.overview": "{count} 个 L0 模块 · 总览",
   "graph.revealed": "{count} 个 L0 模块 · 已展开 L1",
+  "graph.readOnlyView": "只读视图",
   "graph.legendAdded": "新增",
   "graph.legendRemoved": "删除",
   "graph.legendModified": "修改",
@@ -1786,6 +1764,7 @@ const zh: Record<MessageKey, string> = {
   "toast.notApprovable": "此提案当前不可批准。请重新扫描以创建新的审阅。",
   "toast.approvedArchitectureOnly": "架构已批准。此变更仅涉及架构，未运行代码。",
   "toast.approvedImplementationStarted": "架构已批准。实现轮次已开始。",
+  "toast.approvedImplementationPaused": "架构已批准。配置 AI Provider 后即可开始实现。",
   "toast.noProposalReject": "没有可拒绝的提案。",
   "toast.notRejectable": "此提案已不可拒绝。",
   "toast.rejected": "提案已拒绝，仍保留在审计历史中。",
@@ -1900,7 +1879,7 @@ const zh: Record<MessageKey, string> = {
   "session.noDrift": "{ordinal} 之后已无架构漂移。已批准的图与当前源码事实一致。{summary}",
   "session.inSync": "架构与源码事实一致。{summary}",
   "session.amendmentReady":
-    "{ordinal} 的架构修正已准备好审阅：新增 {added}，更新 {updated}，删除 {removed}。批准只修改架构，不会重写代码。{summary}",
+    "{ordinal} 的架构与代码修复已准备好审阅：新增 {added}，更新 {updated}，删除 {removed}。批准后会应用架构变更，并基于修复后的图开始实现。{summary}",
   "session.importReady":
     "{kind}已准备好审阅：新增 {added}，更新 {updated}，删除 {removed}。{summary}",
   "session.importKindInitial": "初始架构导入",
@@ -1910,6 +1889,7 @@ const zh: Record<MessageKey, string> = {
   "session.approvedArchitecture": "已批准架构版本 {ordinal}。此变更仅涉及架构，无需代码实现。",
   "session.approvedVersion": "已批准版本 {ordinal}。{next}",
   "session.startingImplementation": "开始实现。",
+  "session.resumingImplementation": "正在从 WAL 审批记录恢复实现：{title}。",
   "session.implementationPaused": "未配置 AI Provider，实现已暂停。请打开设置进行配置。",
   "session.rejected": "已拒绝提案。",
   "session.rejectedWithNote": "已拒绝提案：{note}",
@@ -1950,17 +1930,18 @@ const zh: Record<MessageKey, string> = {
   "session.syncTitle.import": "导入现有架构",
   "session.syncTitle.sync": "将架构与源码同步",
   "session.syncGoal.amendment":
-    "接受实现“{title}”后观察到的源码事实。新增 {added}，更新 {updated}，删除 {removed}。此修正只修改架构，不修改代码。",
+    "修复实现“{title}”后发现的架构漂移，并更新源码以符合修正后的架构。新增 {added}，更新 {updated}，删除 {removed}。",
   "session.syncGoal.import":
     "将 {files} 个源文件导入为可审阅的 L0/L1 架构。批准前请审阅模块边界与职责。",
   "session.syncGoal.sync":
     "让已批准的架构与 {files} 个扫描到的源文件保持一致。新增 {added}，更新 {updated}，删除 {removed}。",
-  "session.syncTask.amendment": "审阅漂移修正",
+  "session.syncTask.amendment": "审阅并实现漂移修复",
   "session.syncTask.import": "审阅初始架构导入",
   "session.syncTask.sync": "审阅源码同步",
   "session.syncAcceptance.amendment.1": "每个新增或删除的节点都反映当前源码树",
   "session.syncAcceptance.amendment.2": "没有图差异就不接受任何架构变更",
-  "session.syncAcceptance.amendment.3": "修正后的架构仍是未来代码的批准依据",
+  "session.syncAcceptance.amendment.3": "更新源码，使其符合修正后的架构",
+  "session.noCodeChanges": "实现没有产生任何源码文件变更。",
   "session.syncAcceptance.import.1": "每个 L0 模块都有可识别的职责",
   "session.syncAcceptance.import.2": "L1 单元映射到真实文件",
   "session.syncAcceptance.import.3": "删除不会移除仍然需要的架构",
@@ -2093,33 +2074,6 @@ const zh: Record<MessageKey, string> = {
   "verify.reuseCheck": "复用检查",
   "verify.languageDiagnostics": "语言诊断",
 
-  "localPlan.intentOnlyTitle": "仅意图版本",
-  "localPlan.intentOnlyTask": "澄清请求的变更，并在已批准架构内实现",
-  "localPlan.intentOnlyAcceptance": "结果符合目标，且不会静默改变架构",
-  "localPlan.intentOnlyGeneric":
-    "已准备仅意图版本。没有提出结构性变更，因此审阅成本很低；批准后我会沿用现有架构继续。",
-  "localPlan.intentOnlyQuestion": "已准备仅意图版本以记录这个问题。回答它不需要改变架构。",
-  "localPlan.intentOnlyUnsafe":
-    "无法从该请求推断出安全的结构性操作。已准备仅意图版本；请使用更明确的动词（新增、删除、重命名、职责），或配置 AI Provider 进行语义规划。",
-  "localPlan.removeTitle": "移除 {name}",
-  "localPlan.removeTask": "移除 {name} 及其包含边",
-  "localPlan.removeAcceptance": "没有已批准节点或边引用被移除的单元",
-  "localPlan.removeMessage": "已准备 {name} 的移除提案。批准前请检查其子节点和依赖方。",
-  "localPlan.renameTitle": "重命名 {name}",
-  "localPlan.renameTask": "将 {name} 重命名为 {to}",
-  "localPlan.renameAcceptance": "节点保留稳定 id，并更新职责",
-  "localPlan.renameMessage": "已准备将 {name} 重命名为 {to}。",
-  "localPlan.responsibilityTitle": "更新 {name} 的职责",
-  "localPlan.responsibilityTask": "细化 {name} 的职责",
-  "localPlan.responsibilityAcceptance": "新职责足够具体，便于验证",
-  "localPlan.responsibilityMessage": "已准备 {name} 的职责更新。",
-  "localPlan.addModuleTitle": "添加模块 {name}",
-  "localPlan.addUnitTitle": "添加 L1 单元 {name}",
-  "localPlan.addTask": "在不重复现有单元的前提下添加并实现 {name}",
-  "localPlan.addAcceptanceResponsibility": "新单元有单一明确的职责",
-  "localPlan.addAcceptanceReuse": "写代码前已考虑复用计划",
-  "localPlan.addModuleMessage": "已准备 {name} 的模块提案（L0）。写代码前会先展示差异。",
-  "localPlan.addUnitMessage": "已准备 {name} 的{kind}提案（L1）。写代码前会先展示差异。",
 };
 
 const dictionaries: Record<Language, Record<MessageKey, string>> = { en, zh };

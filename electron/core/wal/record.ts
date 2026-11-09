@@ -1,8 +1,20 @@
 import { hashValue, isSha256 } from "../hash/canonical";
 import { isUlid } from "../ids/ulid";
 import { parseHlc } from "../time/hlc";
-import type { Actor, ArchOp, Intent, NodeKind, NodeLevel, EdgeKind, Decision, ImplementationRecord, Touch } from "../../../shared/arch/types";
-import type { WalRecord, WalRecordDraft, WalRecordType } from "../../../shared/wal/types";
+import type {
+  Actor,
+  ArchOp,
+  Decision,
+  EdgeKind,
+  ImplementationRecord,
+  Intent,
+  NodeKind,
+  NodeLevel,
+  Touch,
+  WalRecord,
+  WalRecordDraft,
+  WalRecordType,
+} from "../../../shared/ledger/types";
 
 const RECORD_TYPES: ReadonlySet<string> = new Set<WalRecordType>([
   "intent",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { ArchNodeDraft } from "../../../shared/arch/types";
+import type { ArchNodeDraft } from "../../../shared/ledger/types";
 import type { ScanResult } from "./scanner";
 import { applySemanticRefinement, parseSemanticRefinement, semanticPath } from "./semantic";
 

@@ -65,7 +65,6 @@ type Draft = {
   inputPrice: number;
   outputPrice: number;
   runtime: "custom" | "eko";
-  autoImplement: boolean;
   semanticScan: boolean;
   temperature: number;
   maxTokens: number;
@@ -90,7 +89,6 @@ function draftFrom(settings: AppSettings): Draft {
     inputPrice: settings.provider.inputPricePerMillion ?? 0,
     outputPrice: settings.provider.outputPricePerMillion ?? 0,
     runtime: settings.agent.runtime,
-    autoImplement: settings.agent.autoImplement,
     semanticScan: settings.agent.semanticScan,
     temperature: settings.agent.temperature,
     maxTokens: settings.agent.maxTokens,
@@ -730,21 +728,6 @@ function ProviderTab({
             <span className="block text-[10.5px] font-semibold">{t("settings.semanticScan")}</span>
             <span className="mt-0.5 block text-[9px] leading-relaxed text-[var(--faint)]">
               {t("settings.semanticScanDetail")}
-            </span>
-          </span>
-        </label>
-
-        <label className="mt-3 flex cursor-pointer items-start gap-2.5 rounded-lg border border-[var(--border)] px-3 py-2.5">
-          <input
-            type="checkbox"
-            className="mt-0.5 accent-cyan-300"
-            checked={draft.autoImplement}
-            onChange={(event) => setDraft({ autoImplement: event.target.checked })}
-          />
-          <span>
-            <span className="block text-[10.5px] font-semibold">{t("settings.autoImplement")}</span>
-            <span className="mt-0.5 block text-[9px] leading-relaxed text-[var(--faint)]">
-              {t("settings.autoImplementDetail")}
             </span>
           </span>
         </label>
@@ -1435,7 +1418,6 @@ export function SettingsDialog() {
       providerInputPrice: draft.inputPrice,
       providerOutputPrice: draft.outputPrice,
       runtime: draft.runtime,
-      autoImplement: draft.autoImplement,
       semanticScan: draft.semanticScan,
       temperature: draft.temperature,
       maxTokens: draft.maxTokens,

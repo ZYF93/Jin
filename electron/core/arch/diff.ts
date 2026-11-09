@@ -6,7 +6,7 @@ import type {
   NodeChange,
   RiskHint,
 } from "../../../shared/arch/diff";
-import type { ArchEdge, ArchNode, ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchEdge, ArchNode, ArchSnapshot } from "../../../shared/ledger/types";
 
 const NODE_FIELDS: ReadonlyArray<keyof ArchNode> = [
   "level",

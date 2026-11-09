@@ -151,7 +151,6 @@ function emptySettings(): AppSettings {
     },
     agent: {
       runtime: "custom",
-      autoImplement: true,
       semanticScan: true,
       temperature: 0.2,
       maxTokens: 8000,
@@ -697,6 +696,7 @@ function registerIpcHandlers(): void {
     applyNativeTheme(settings.theme);
     if (activeSession) {
       activeSession.setConfigTheme(settings.theme, settings.glass);
+      activeSession.resumePendingImplementation();
     }
     if (updateService) {
       updateService.configure({
@@ -960,6 +960,10 @@ function createWindow(): BrowserWindow {
     minHeight: 640,
     show: false,
     title: "Jin",
+    icon: join(
+      app.getAppPath(),
+      process.platform === "win32" ? "build/icon.ico" : "build/icon.png",
+    ),
     backgroundColor: "#0a0d14",
     autoHideMenuBar: false,
     webPreferences: {

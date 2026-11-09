@@ -28,8 +28,9 @@ import type {
   IntentTask,
   Touch,
   VersionState,
+  WalRecord,
   WalConflict,
-} from "../../shared/arch/types";
+} from "../../shared/ledger/types";
 import type {
   AgentStatus,
   AppState,
@@ -50,7 +51,6 @@ import type {
   WalInfo,
 } from "../../shared/ipc";
 import { commitFileTransaction, type StagedFileEdit } from "./agent/file-transaction";
-import type { WalRecord } from "../../shared/wal/types";
 import {
   applyIntent,
   applyTouch,
@@ -138,7 +138,7 @@ interface InternalProposal {
   createdAt: string;
   status: "in_review" | "stale" | "approved" | "rejected";
   opRecordIds?: string[];
-  /** Scan syncs and amendments change architecture only; no code turn follows approval. */
+  /** Scan syncs and imports are graph-only; drift amendments also trigger implementation. */
   architectureOnly?: boolean;
 }
 
@@ -391,16 +391,57 @@ export class ProjectSession {
         phase: "scanning",
         message: this.t("scan.refreshing"),
       };
-      void this.refreshFacts().catch((error: unknown) => {
-        this.scanStatus = {
-          ...this.scanStatus,
-          phase: "failed",
-          message: error instanceof Error ? error.message : String(error),
-        };
-        this.emitState();
-      });
+      void this.refreshFacts()
+        .then(() => this.resumePendingImplementation())
+        .catch((error: unknown) => {
+          this.scanStatus = {
+            ...this.scanStatus,
+            phase: "failed",
+            message: error instanceof Error ? error.message : String(error),
+          };
+          this.emitState();
+        });
     }
     this.emitState();
+  }
+
+  /**
+   * Approval is durable in the WAL. If the process stopped after recording an
+   * approval but before the implementation record was appended, resume the
+   * newest code version after loading the source context. This does not depend
+   * on planner history or the size of its compressed architecture prompt.
+   */
+  resumePendingImplementation(): void {
+    if (!this.scanResult || !this.deps.settings.isAgentConfigured()) return;
+    if (this.agentStatus.phase !== "idle" && this.agentStatus.phase !== "error") return;
+    const latest = Object.values(this.snapshot.versions).sort(
+      (left, right) => (right.ordinal ?? 0) - (left.ordinal ?? 0),
+    )[0];
+    if (!latest || latest.status !== "approved" || latest.implementations.length > 0) return;
+    const intent = this.snapshot.intents[latest.intentId];
+    if (!intent || intent.mode === "architecture") return;
+    const attemptEnded = this.messages.some(
+      (message) =>
+        message.proposalId === latest.id &&
+        (message.kind === "error" ||
+          message.content === translate("en", "session.implementationCancelled") ||
+          message.content === translate("zh", "session.implementationCancelled")),
+    );
+    if (attemptEnded) return;
+    this.addMessage(
+      "assistant",
+      "text",
+      this.t("session.resumingImplementation", { title: intent.title }),
+      { proposalId: latest.id },
+    );
+    void this.retryImplementation(latest.id).catch((error: unknown) => {
+      this.agentStatus = {
+        phase: "error",
+        message: error instanceof Error ? error.message : String(error),
+        versionId: latest.id,
+      };
+      this.emitState();
+    });
   }
 
   private currentActor(): Actor {
@@ -1337,10 +1378,10 @@ export class ProjectSession {
         nodeIntents: scanNodeIntents(scan.nodes),
         author: this.currentActor(),
         createdAt: nowIso(),
-        mode: "architecture",
+        mode: amendment ? "code" : "architecture",
       };
       const proposal = this.makeProposal(intent, importResult.ops, [], null);
-      proposal.architectureOnly = true;
+      if (!amendment) proposal.architectureOnly = true;
       this.proposal = proposal;
       const summary = `${this.scanStatusSummary(scan)}${
         semanticSummary ? ` ${semanticSummary}` : ""
@@ -1619,11 +1660,7 @@ export class ProjectSession {
       );
     }
     this.emitState();
-    if (
-      !proposal.architectureOnly &&
-      this.deps.settings.isAgentConfigured() &&
-      this.deps.settings.get().agent.autoImplement
-    ) {
+    if (!proposal.architectureOnly && this.deps.settings.isAgentConfigured()) {
       void this.implementVersion(proposal);
     }
     return this.getState();
@@ -1999,6 +2036,9 @@ Rules:
           ? edit.originalExists
           : !edit.originalExists || edit.content !== edit.originalContent,
       );
+      if (changed.length === 0) {
+        throw new Error(this.t("session.noCodeChanges"));
+      }
       commitFileTransaction(changed, {
         writeAtomic: (absolute, content) => this.writeFileAtomic(absolute, content),
         checkCancelled: () => {

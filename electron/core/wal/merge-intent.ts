@@ -3,7 +3,7 @@ import type {
   ArchNode,
   ArchOp,
   ArchSnapshot,
-} from "../../../shared/arch/types";
+} from "../../../shared/ledger/types";
 import { hashValue } from "../hash/canonical";
 import { applyOp, hashEdgeForWrite, hashNodeForWrite } from "../arch/snapshot";
 

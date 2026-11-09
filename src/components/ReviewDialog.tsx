@@ -31,6 +31,55 @@ function RiskIcon({ level }: { level: RiskHint["level"] }) {
   return <CheckCircle2 size={12} className="text-[var(--faint)]" />;
 }
 
+function ApprovalFlow({ architectureOnly }: { architectureOnly: boolean }) {
+  const t = useT();
+  const steps = [
+    { label: t("approvalFlow.proposal"), state: "done" },
+    { label: t("approvalFlow.approval"), state: "current" },
+    ...(architectureOnly
+      ? [{ label: t("approvalFlow.graphOnly"), state: "pending" as const }]
+      : [
+          { label: t("approvalFlow.implementation"), state: "pending" as const },
+          { label: t("approvalFlow.verification"), state: "pending" as const },
+        ]),
+  ] as const;
+
+  return (
+    <ol
+      className={`grid shrink-0 gap-1 border-b border-[var(--border)] px-4 py-2.5 ${
+        architectureOnly ? "grid-cols-3" : "grid-cols-4"
+      }`}
+      aria-label={t("approvalFlow.title")}
+    >
+      {steps.map((step, index) => (
+        <li key={step.label} className="flex min-w-0 items-center gap-1.5">
+          <span
+            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[8px] ${
+              step.state === "done"
+                ? "border-emerald-400/30 bg-emerald-400/10 text-[var(--success)]"
+                : step.state === "current"
+                  ? "border-amber-300/35 bg-amber-300/10 text-[var(--warning)]"
+                  : "border-[var(--border)] text-[var(--faint)]"
+            }`}
+          >
+            {step.state === "done" ? <CheckCircle2 size={11} /> : index + 1}
+          </span>
+          <span
+            className={`min-w-0 truncate text-[8px] ${
+              step.state === "current" ? "font-semibold text-[var(--text)]" : "text-[var(--faint)]"
+            }`}
+          >
+            {step.label}
+          </span>
+          {index < steps.length - 1 ? (
+            <span className="ml-auto h-px min-w-1 flex-1 bg-[var(--border)]" />
+          ) : null}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 function ReviewDetails({ proposal }: { proposal: ProposalView }) {
   const t = useT();
   const intent = proposal.intent;
@@ -279,6 +328,8 @@ export function ReviewDialog() {
               })}
             </span>
           </ModalHeader>
+
+          <ApprovalFlow architectureOnly={proposal.architectureOnly} />
 
           <div className="review-grid min-h-0 flex-1">
             <div className="modal-sidebar min-h-0 overflow-y-auto">

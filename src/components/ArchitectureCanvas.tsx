@@ -22,12 +22,13 @@ import {
   GitBranch,
   GitCompareArrows,
   Layers3,
+  LockKeyhole,
   Loader2,
   Sparkles,
   X,
 } from "lucide-react";
 import type { ArchDiff, ChangeKind } from "../../shared/arch/diff";
-import type { ArchEdge, ArchNode, ArchSnapshot, Intent, NodeIntent } from "../../shared/arch/types";
+import type { ArchEdge, ArchNode, ArchSnapshot, Intent, NodeIntent } from "../../shared/ledger/types";
 import { buildDemoGraph } from "../lib/demo-graph";
 import {
   buildArchitectureGraph,
@@ -409,6 +410,11 @@ function NodeInspector({ node, onClose, context, focused, onToggleFocus }: Inspe
             <span className={dotClass(detail)} />
             <span className="chip">{detail.level}</span>
             <span className="chip">{kindLabel(detail.kind)}</span>
+            {context.readOnly ? (
+              <span className="chip h-[17px] gap-1 px-1.5 text-[8px]">
+                <LockKeyhole size={8} /> {t("graph.readOnlyView")}
+              </span>
+            ) : null}
             {propagated ? (
               <span className={`chip ${changeChipClass(propagated)}`}>
                 {changeLabel(propagated)}
@@ -1037,14 +1043,14 @@ function GraphInner({ compact = false }: { compact?: boolean }) {
             snapshot: proposal.targetSnapshot,
             diff: proposal.diff,
             intent: proposal.intent,
-            readOnly: false,
+            readOnly: true,
           }
         : app?.snapshot
           ? {
               snapshot: app.snapshot,
               diff: null,
               intent: null,
-              readOnly: false,
+              readOnly: true,
             }
           : null;
   const selected = model.nodes.find((node) => node.id === selectedNodeId) ?? null;
@@ -1060,7 +1066,13 @@ function GraphInner({ compact = false }: { compact?: boolean }) {
 
   return (
     <div className="relative flex h-full min-h-0 w-full overflow-hidden">
-      <div ref={canvasRef} className="relative min-w-0 flex-1 overflow-hidden">
+      <div
+        ref={canvasRef}
+        className="relative min-w-0 flex-1 overflow-hidden"
+        role="region"
+        aria-label={t("graph.readOnlyView")}
+        aria-readonly="true"
+      >
         {versionReplayLoading && !compact ? (
           <div className="absolute inset-0 z-20 flex items-center justify-center">
             <div className="glass flex items-center gap-2.5 rounded-xl px-4 py-3 text-[10.5px] text-[var(--muted)]">
@@ -1087,7 +1099,7 @@ function GraphInner({ compact = false }: { compact?: boolean }) {
             minZoom={0.08}
             maxZoom={1.8}
             nodesConnectable={false}
-            nodesDraggable
+            nodesDraggable={false}
             elementsSelectable
             selectNodesOnDrag={false}
             onlyRenderVisibleElements
@@ -1176,6 +1188,9 @@ function GraphInner({ compact = false }: { compact?: boolean }) {
               <Crosshair size={12} />
             </button>
           </div>
+          <span className="chip gap-1">
+            <LockKeyhole size={9} /> {t("graph.readOnlyView")}
+          </span>
           {demo ? (
             <span className="chip chip-accent">
               <Sparkles size={10} />

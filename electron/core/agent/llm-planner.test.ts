@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { ArchNode, ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchNode, ArchSnapshot } from "../../../shared/ledger/types";
 import { emptySnapshot } from "../arch/snapshot";
 import { architectureSummary, plannerContextBudget, planWithProvider } from "./llm-planner";
 

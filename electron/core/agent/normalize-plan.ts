@@ -9,7 +9,7 @@ import type {
   NodeIntent,
   NodeKind,
   NodeStatus,
-} from "../../../shared/arch/types";
+} from "../../../shared/ledger/types";
 import { hashEdgeForWrite, hashNodeForWrite } from "../arch/snapshot";
 import { isStableId, stableIds } from "../ids/stable";
 import { isUlid } from "../ids/ulid";

@@ -1,5 +1,5 @@
 import type { ArchDiff } from "../../shared/arch/diff";
-import type { ArchEdge, ArchNode, ArchSnapshot, Intent, VersionState } from "../../shared/arch/types";
+import type { ArchEdge, ArchNode, ArchSnapshot, Intent, VersionState } from "../../shared/ledger/types";
 import type { GraphReplay } from "./graph";
 
 const STAMP = "2026-11-04T09:30:00.000Z";

@@ -165,6 +165,24 @@ function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
   }
   const working =
     agent.phase === "planning" || agent.phase === "implementing" || agent.phase === "verifying";
+  const flow = [
+    {
+      key: "approvalFlow.plan",
+      done: agent.phase !== "planning",
+      active: agent.phase === "planning",
+    },
+    {
+      key: "approvalFlow.approval",
+      done: agent.phase === "implementing" || agent.phase === "verifying",
+      active: false,
+    },
+    {
+      key: "approvalFlow.implementation",
+      done: agent.phase === "verifying",
+      active: agent.phase === "implementing",
+    },
+    { key: "approvalFlow.verification", done: false, active: agent.phase === "verifying" },
+  ] as const;
   return (
     <div className="fade-in flex gap-2 px-1">
       <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--panel-soft)]">
@@ -204,6 +222,32 @@ function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
             </button>
           ) : null}
         </div>
+        {working ? (
+          <ol
+            className="mt-2 grid grid-cols-4 gap-1"
+            aria-label={t("approvalFlow.title")}
+          >
+            {flow.map((step) => (
+              <li
+                key={step.key}
+                className={`flex min-w-0 items-center gap-1 text-[7px] ${
+                  step.done
+                    ? "text-[var(--success)]"
+                    : step.active
+                      ? "font-semibold text-[var(--accent)]"
+                      : "text-[var(--faint)]"
+                }`}
+              >
+                {step.done ? (
+                  <CheckCircle2 size={8} />
+                ) : (
+                  <span className="h-1 w-1 rounded-full bg-current" />
+                )}
+                <span className="truncate">{t(step.key)}</span>
+              </li>
+            ))}
+          </ol>
+        ) : null}
         {working ? (
           <div className="mt-1 flex items-center gap-1.5 px-1 text-[8px] text-[var(--faint)]">
             <span className="typing-dots">

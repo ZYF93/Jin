@@ -9,7 +9,7 @@ import type {
   Touch,
   VersionStatus,
   WalConflict,
-} from "./arch/types";
+} from "./ledger/types";
 import type { Language } from "./i18n";
 
 export type { Language } from "./i18n";
@@ -89,7 +89,6 @@ export interface AppSettings {
   agent: {
     /** `custom` uses the deterministic patch-first JSON coder; `eko` uses a staged Eko ReAct loop. */
     runtime: "custom" | "eko";
-    autoImplement: boolean;
     /** Refine L1 kinds, responsibilities and domain tags with the configured model during a manual scan. */
     semanticScan: boolean;
     temperature: number;
@@ -129,7 +128,6 @@ export interface SettingsPatch {
   providerOutputPrice?: number;
   /** Omit to leave unchanged; pass null to delete the stored key. */
   apiKey?: string | null;
-  autoImplement?: boolean;
   runtime?: "custom" | "eko";
   semanticScan?: boolean;
   temperature?: number;
@@ -461,7 +459,7 @@ export interface ProposalView {
   reusePlan: ReusePlan | null;
   createdAt: string;
   status: "in_review" | "stale" | "approved" | "rejected";
-  /** Scan syncs and amendments change architecture only; no code turn follows approval. */
+  /** Scan syncs and imports are graph-only; drift amendments also trigger implementation. */
   architectureOnly: boolean;
 }
 
@@ -593,7 +591,7 @@ export interface JinBridge {
   chooseProjectDirectory(): Promise<string | null>;
   refresh(): Promise<AppState>;
   scan(): Promise<AppState>;
-  /** Draft an architecture-only amendment for a version whose implementation drifted. */
+  /** Draft an architecture and code repair for a version whose implementation drifted. */
   amendArchitecture(versionId: string): Promise<AppState>;
   /** Draft a merge intent for versions the fold skipped after a Git merge. */
   mergeIntent(): Promise<AppState>;

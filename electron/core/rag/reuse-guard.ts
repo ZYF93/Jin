@@ -1,4 +1,4 @@
-import type { ImplementationCheck } from "../../../shared/arch/types";
+import type { ImplementationCheck } from "../../../shared/ledger/types";
 import type { ReusePlan } from "../../../shared/ipc";
 import type { ScanResult } from "../scan/scanner";
 

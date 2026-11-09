@@ -9,9 +9,9 @@ import type {
   Intent,
   Touch,
   VersionState,
+  WalRecord,
   WalConflict,
-} from "../../../shared/arch/types";
-import type { WalRecord } from "../../../shared/wal/types";
+} from "../../../shared/ledger/types";
 
 export function emptySnapshot(): ArchSnapshot {
   return {

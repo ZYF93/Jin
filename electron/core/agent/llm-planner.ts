@@ -4,7 +4,7 @@ import type {
   L1Kind,
   NodeKind,
   NodeStatus,
-} from "../../../shared/arch/types";
+} from "../../../shared/ledger/types";
 import type { ProviderConfig } from "./provider";
 import { completeJson, ProviderError } from "./provider";
 import type {
@@ -251,7 +251,7 @@ function parseOps(value: unknown): PlannedOp[] {
             id: edge.id,
             from: edge.from,
             to: edge.to,
-            kind: stringValue(edge.kind) as import("../../../shared/arch/types").EdgeKind,
+            kind: stringValue(edge.kind) as import("../../../shared/ledger/types").EdgeKind,
             metadata: isRecord(edge.metadata) ? edge.metadata : {},
           },
         });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { ArchEdge, ArchNode, ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchEdge, ArchNode, ArchSnapshot } from "../../../shared/ledger/types";
 import { applyOp, emptySnapshot, hashNodeForWrite } from "../arch/snapshot";
 import { planMerge } from "./merge-intent";
 

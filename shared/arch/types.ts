@@ -116,10 +116,7 @@ export interface Intent {
   nodeIntents: NodeIntent[];
   author: Actor;
   createdAt: string;
-  /**
-   * Scan syncs, imports and drift amendments change architecture only: their
-   * approval never starts a code turn. Absent means "code" for old records.
-   */
+  /** Scans and imports are graph-only; drift amendments also implement code after approval. */
   mode?: "architecture" | "code";
   /**
    * Conflicted version ids reconciled by this merge intent. Once approved, the

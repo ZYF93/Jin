@@ -7,7 +7,7 @@ import type {
   L1Kind,
   NodeIntent,
   NodeStatus,
-} from "../../../shared/arch/types";
+} from "../../../shared/ledger/types";
 
 export type NodePatch = Partial<
   Pick<
@@ -112,7 +112,7 @@ export interface PlannerHistoryMessage {
 }
 
 export interface PlannerContext {
-  snapshot: import("../../../shared/arch/types").ArchSnapshot;
+  snapshot: import("../../../shared/ledger/types").ArchSnapshot;
   skills: string;
   reuseSummary: string;
   /** Recent conversational turns, oldest first, for follow-up continuity. */

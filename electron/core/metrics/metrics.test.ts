@@ -4,7 +4,7 @@ import type {
   ImplementationRecord,
   Intent,
   VersionState,
-} from "../../../shared/arch/types";
+} from "../../../shared/ledger/types";
 import { emptySnapshot } from "../arch/snapshot";
 import { computeProjectMetrics } from "./metrics";
 

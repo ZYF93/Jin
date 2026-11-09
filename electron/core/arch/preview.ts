@@ -1,4 +1,4 @@
-import type { ArchOp, ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchOp, ArchSnapshot } from "../../../shared/ledger/types";
 import type { RiskHint } from "../../../shared/arch/diff";
 import { diffSnapshots, riskHints } from "./diff";
 import { applyOp, cloneSnapshot } from "./snapshot";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { ArchDiff } from "../../shared/arch/diff";
-import type { ArchNode, ArchSnapshot } from "../../shared/arch/types";
+import type { ArchNode, ArchSnapshot } from "../../shared/ledger/types";
 import type { ProposalView } from "../../shared/ipc";
 import {
   buildArchitectureGraph,

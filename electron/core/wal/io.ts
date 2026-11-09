@@ -14,7 +14,7 @@ import { dirname } from "node:path";
 import type {
   WalParseResult,
   WalRecord,
-} from "../../../shared/wal/types";
+} from "../../../shared/ledger/types";
 import {
   parseRecordLine,
   serializeRecord,

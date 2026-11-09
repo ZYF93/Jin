@@ -6,8 +6,8 @@ import type {
   Actor,
   ArchNodeDraft,
   Intent,
-} from "../../../shared/arch/types";
-import type { WalRecord } from "../../../shared/wal/types";
+  WalRecord,
+} from "../../../shared/ledger/types";
 import {
   diffHashForVersion,
   emptySnapshot,

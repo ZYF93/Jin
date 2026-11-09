@@ -20,7 +20,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
-import type { VersionState } from "../../shared/arch/types";
+import type { VersionState } from "../../shared/ledger/types";
 import {
   failedConformance,
   hasFailedDrift,

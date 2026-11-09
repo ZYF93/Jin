@@ -1,4 +1,4 @@
-import type { WalRecord } from "../../../shared/wal/types";
+import type { WalRecord } from "../../../shared/ledger/types";
 
 /**
  * Return the current causal frontier. A linear log has one head; a merged log

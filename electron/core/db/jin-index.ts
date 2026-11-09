@@ -4,8 +4,8 @@ import type {
   FoldResult,
   WalConflict,
   WalConflictCode,
-} from "../../../shared/arch/types";
-import type { WalRecord } from "../../../shared/wal/types";
+  WalRecord,
+} from "../../../shared/ledger/types";
 import { foldWal } from "../wal/fold";
 import { loadWal } from "../wal/io";
 import { cachePath, walPath } from "../project/config";

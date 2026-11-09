@@ -432,11 +432,15 @@ export const useJin = create<JinStore>((set, get) => {
       );
       if (app) {
         set({ reviewOpen: false });
+        const implementationStarted =
+          app.agent.phase === "implementing" || app.agent.phase === "verifying";
         notify(
-          "success",
+          proposal.architectureOnly || implementationStarted ? "success" : "info",
           proposal.architectureOnly
             ? t("toast.approvedArchitectureOnly")
-            : t("toast.approvedImplementationStarted"),
+            : implementationStarted
+              ? t("toast.approvedImplementationStarted")
+              : t("toast.approvedImplementationPaused"),
         );
       }
     },

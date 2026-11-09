@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { ArchEdge, ArchNode, ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchEdge, ArchNode, ArchSnapshot } from "../../../shared/ledger/types";
 import { emptySnapshot, hashEdgeForWrite, hashNodeForWrite } from "../arch/snapshot";
 import { diffScanToOps, scanNodeIntents } from "./import";
 import type { ScanResult } from "./scanner";

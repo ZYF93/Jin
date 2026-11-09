@@ -5,7 +5,7 @@ import type {
   ArchOp,
   ArchSnapshot,
   Intent,
-} from "../../../shared/arch/types";
+} from "../../../shared/ledger/types";
 import { hashEdgeForWrite, hashNodeForWrite } from "../arch/snapshot";
 import type { ScanResult } from "./scanner";
 

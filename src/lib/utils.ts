@@ -1,6 +1,6 @@
 import type { ArchDiff, ChangeKind, RiskHint } from "../../shared/arch/diff";
 import type { MessageKey } from "../../shared/i18n";
-import type { NodeStatus } from "../../shared/arch/types";
+import type { NodeStatus } from "../../shared/ledger/types";
 import type {
   ArchSnapshot,
   ProposalView,

@@ -6,7 +6,7 @@ import type {
   ArchSnapshot,
   ConformanceResult,
   ImplementationCheck,
-} from "../../../shared/arch/types";
+} from "../../../shared/ledger/types";
 import type { ScanResult } from "../scan/scanner";
 
 export interface VerifyInput {

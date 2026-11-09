@@ -1,10 +1,10 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchSnapshot } from "../../../shared/ledger/types";
 import { hashSnapshot } from "../arch/snapshot";
 
-export const INDEX_SCHEMA_VERSION = 2;
+export const INDEX_SCHEMA_VERSION = 3;
 
 export interface IndexMeta {
   schemaVersion: number;
@@ -143,7 +143,10 @@ export function initializeSchema(db: DatabaseSync): void {
       text TEXT NOT NULL,
       node_id TEXT,
       vector BLOB NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      source_mtime_ms REAL NOT NULL DEFAULT 0,
+      source_size INTEGER NOT NULL DEFAULT 0,
+      architecture_text TEXT NOT NULL DEFAULT ''
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS rag_fts USING fts5(
@@ -179,6 +182,20 @@ export function initializeSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
     CREATE INDEX IF NOT EXISTS idx_versions_status ON versions(status);
   `);
+
+  // These columns let the disposable RAG cache reuse unchanged source files.
+  // Existing projects receive them in place; a cache rebuild is never needed.
+  for (const [name, definition] of [
+    ["source_mtime_ms", "REAL NOT NULL DEFAULT 0"],
+    ["source_size", "INTEGER NOT NULL DEFAULT 0"],
+    ["architecture_text", "TEXT NOT NULL DEFAULT ''"],
+  ] as const) {
+    try {
+      db.exec(`ALTER TABLE rag_docs ADD COLUMN ${name} ${definition}`);
+    } catch {
+      // The column already exists.
+    }
+  }
 
   db.prepare(
     "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { ArchOp, ArchSnapshot, Intent } from "../../../shared/arch/types";
+import type { ArchOp, ArchSnapshot, Intent } from "../../../shared/ledger/types";
 import type { ReuseCandidate, ReusePlan } from "../../../shared/ipc";
 import { applyUnifiedPatchFile, parseUnifiedPatch } from "./patch";
 import { normalizeProjectPath } from "./path-safety";

@@ -1,5 +1,4 @@
-import type { WalConflict } from "../../../shared/arch/types";
-import type { WalRecord } from "../../../shared/wal/types";
+import type { WalConflict, WalRecord } from "../../../shared/ledger/types";
 import { compareHlc } from "../time/hlc";
 
 export interface OrderedRecords {

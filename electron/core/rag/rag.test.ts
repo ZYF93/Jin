@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
-import type { ArchNode, ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchNode, ArchSnapshot } from "../../../shared/ledger/types";
 import { emptySnapshot } from "../arch/snapshot";
 import { openSqlite } from "../db/schema";
 import type { JinConfig } from "../project/config";

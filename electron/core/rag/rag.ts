@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchSnapshot } from "../../../shared/ledger/types";
 import type { ReuseCandidate, ReusePlan } from "../../../shared/ipc";
 import type { ScanResult, ScannedFile } from "../scan/scanner";
 import { RagStore, type PersistedRagDoc } from "./rag-store";
@@ -16,6 +16,8 @@ interface RagDoc {
   tokens: Map<string, number>;
   vector: Float32Array;
   architectureText: string;
+  sourceMtimeMs: number;
+  sourceSize: number;
 }
 
 const MAX_DOC_CHARS = 160_000;
@@ -81,7 +83,9 @@ export class RagService {
           `${doc.path}\n${doc.title}\n${doc.symbols}\n${doc.responsibility}\n${doc.text}`,
         ),
         vector: doc.vector,
-        architectureText: "",
+        architectureText: doc.architectureText,
+        sourceMtimeMs: doc.sourceMtimeMs,
+        sourceSize: doc.sourceSize,
       }));
       this.pathToNodeId = new Map(
         persisted
@@ -96,6 +100,8 @@ export class RagService {
   }
 
   update(root: string, scan: ScanResult, snapshot: ArchSnapshot | null): void {
+    this.hydrate();
+    const previous = new Map(this.docs.map((doc) => [doc.path, doc]));
     const fileToNode = new Map<string, ArchSnapshot["nodes"][string]>();
     if (snapshot) {
       for (const node of Object.values(snapshot.nodes)) {
@@ -122,13 +128,36 @@ export class RagService {
     }
 
     const now = new Date().toISOString();
+    const changed: RagDoc[] = [];
     this.docs = scan.files.map((file) => {
       const node = fileToNode.get(file.path) ?? null;
-      let text = "";
+      const cached = previous.get(file.path);
+      let sourceMtimeMs = 0;
+      let sourceSize = file.bytes;
       try {
-        text = readFileSync(join(root, file.path), "utf8").slice(0, MAX_DOC_CHARS);
+        const stat = statSync(join(root, file.path));
+        sourceMtimeMs = stat.mtimeMs;
+        sourceSize = stat.size;
       } catch {
-        text = "";
+        // Keep the scanned size and force the file to be read below.
+      }
+      const symbols = file.exports.join(", ");
+      const sourceUnchanged = Boolean(
+        cached &&
+        cached.sourceMtimeMs > 0 &&
+        cached.sourceMtimeMs === sourceMtimeMs &&
+        cached.sourceSize === sourceSize &&
+        cached.title === file.title &&
+        cached.symbols === symbols &&
+        cached.responsibility === file.responsibility,
+      );
+      let text = cached?.text ?? "";
+      if (!sourceUnchanged) {
+        try {
+          text = readFileSync(join(root, file.path), "utf8").slice(0, MAX_DOC_CHARS);
+        } catch {
+          text = "";
+        }
       }
       const architectureParts: string[] = [];
       if (node) {
@@ -143,27 +172,54 @@ export class RagService {
           depth += 1;
         }
       }
-      const tokens = tokenMap(
-        `${file.path}\n${file.title}\n${file.exports.join(" ")}\n${file.responsibility}\n${text}`,
-      );
-      return {
-        path: file.path,
-        title: file.title,
-        symbols: file.exports.join(", "),
-        responsibility: file.responsibility,
-        text,
-        nodeId: node?.id ?? null,
-        tokens,
-        vector: vectorize(tokens),
-        architectureText: architectureParts.join("\n"),
-      };
+      const nodeId = node?.id ?? null;
+      const architectureText = architectureParts.join("\n");
+      const doc: RagDoc = cached && sourceUnchanged
+        ? {
+            ...cached,
+            nodeId,
+            architectureText,
+            sourceMtimeMs,
+            sourceSize,
+          }
+        : (() => {
+            const tokens = tokenMap(
+              `${file.path}\n${file.title}\n${file.exports.join(" ")}\n${file.responsibility}\n${text}`,
+            );
+            return {
+              path: file.path,
+              title: file.title,
+              symbols,
+              responsibility: file.responsibility,
+              text,
+              nodeId,
+              tokens,
+              vector: vectorize(tokens),
+              architectureText,
+              sourceMtimeMs,
+              sourceSize,
+            };
+          })();
+      if (
+        !sourceUnchanged ||
+        cached?.nodeId !== doc.nodeId ||
+        cached?.architectureText !== doc.architectureText ||
+        cached?.title !== doc.title ||
+        cached?.symbols !== doc.symbols ||
+        cached?.responsibility !== doc.responsibility
+      ) {
+        changed.push(doc);
+      }
+      return doc;
     });
     this.updatedAt = now;
     this.hydrated = true;
     if (this.store) {
       try {
-        this.store.replaceAll(
-          this.docs.map((doc) => ({
+        const currentPaths = new Set(this.docs.map((doc) => doc.path));
+        const deletedPaths = [...previous.keys()].filter((path) => !currentPaths.has(path));
+        this.store.syncChanged(
+          changed.map((doc) => ({
             path: doc.path,
             title: doc.title,
             symbols: doc.symbols,
@@ -172,7 +228,11 @@ export class RagService {
             nodeId: doc.nodeId,
             vector: doc.vector,
             updatedAt: now,
+            sourceMtimeMs: doc.sourceMtimeMs,
+            sourceSize: doc.sourceSize,
+            architectureText: doc.architectureText,
           })),
+          deletedPaths,
         );
       } catch {
         // The durable cache is disposable; scanning and retrieval still work.

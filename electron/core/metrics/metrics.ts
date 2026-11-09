@@ -5,7 +5,7 @@ import type {
   ReuseMetrics,
   UsageMetrics,
 } from "../../../shared/ipc";
-import type { ArchSnapshot } from "../../../shared/arch/types";
+import type { ArchSnapshot } from "../../../shared/ledger/types";
 import {
   hasFailedDrift,
   latestImplementation,
