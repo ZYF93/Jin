@@ -146,6 +146,7 @@ function parseTasks(value: unknown): PlannedTask[] {
     tasks.push({
       title: title.slice(0, 300),
       acceptance: stringArray(task.acceptance).map((item) => item.slice(0, 300)),
+      files: stringArray(task.files).map((item) => item.slice(0, 500)),
       dependsOn: stringArray(task.dependsOn),
     });
   }
@@ -280,6 +281,8 @@ Planning rules (kind "plan" only):
 - For a new node, use an id like "new:short-slug"; Jin will derive a stable id.
 - Reuse an existing L1 before adding a duplicate. If the change is code-only, use zero ops and put the affected existing node(s) in nodeIntents.
 - Keep changes small enough for one human approval. Do not redesign unrelated modules.
+- Give each task concrete, checkable acceptance criteria and list every source/test file it is authorized to change in "files". Use only paths supported by the approved architecture; do not use broad directories or globs.
+- Use "dependsOn" for prerequisite task titles. Independent tasks must be safe to implement without seeing one another's intermediate edits.
 - L0 kinds: system, domain, module, layer, external. L1 kinds: component, hook, entity, service, repository, route, store, type, module, function, table, schema, config. Use module as the neutral L1 kind when a file does not clearly fit another role. Facets: method, field, property.
 - node.add requires: level, kind, parentId, name, path, file, symbol, responsibility, status, metadata.
 - node.update requires id and a patch containing only changed structural fields.
@@ -300,7 +303,7 @@ JSON shape for a plan turn:
   "goal": "one paragraph",
   "message": "what you want the user to review",
   "reuseQuery": "code/reuse search query",
-  "tasks": [{"title": "...", "acceptance": ["..."]}],
+  "tasks": [{"title": "...", "acceptance": ["observable check ..."], "files": ["src/file.ts", "src/file.test.ts"], "dependsOn": []}],
   "nodeIntents": [{"nodeId": "ULID or new:slug", "facetId": "optional", "statement": "...", "invariants": [], "acceptance": []}],
   "ops": [
     {"op":"node.add","node":{"id":"new:slug","level":"L1","kind":"component","parentId":"ULID","name":"...","path":"src/...","file":"src/...","symbol":"","responsibility":"...","status":"planned","metadata":{}}},

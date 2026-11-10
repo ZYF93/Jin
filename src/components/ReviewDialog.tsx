@@ -26,8 +26,7 @@ import { Modal, ModalHeader, Spinner } from "./ui";
 
 function RiskIcon({ level }: { level: RiskHint["level"] }) {
   if (level === "high") return <XCircle size={12} className="text-[var(--danger)]" />;
-  if (level === "medium")
-    return <AlertTriangle size={12} className="text-[var(--warning)]" />;
+  if (level === "medium") return <AlertTriangle size={12} className="text-[var(--warning)]" />;
   return <CheckCircle2 size={12} className="text-[var(--faint)]" />;
 }
 
@@ -90,9 +89,7 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
     <div className="space-y-4 p-4">
       {stale ? (
         <div className="rounded-lg border border-rose-400/25 bg-rose-400/[0.06] p-2.5 text-[9.5px] leading-relaxed text-[var(--muted)]">
-          <strong className="text-[var(--danger)]">
-            {t("review.staleBannerStrong")}
-          </strong>{" "}
+          <strong className="text-[var(--danger)]">{t("review.staleBannerStrong")}</strong>{" "}
           {t("review.staleBanner")}
         </div>
       ) : null}
@@ -100,8 +97,7 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
       <section>
         <div className="flex items-center gap-2">
           <span className="chip chip-warning">
-            <GitPullRequest size={9} />{" "}
-            {stale ? t("review.stale") : t("review.inReview")}
+            <GitPullRequest size={9} /> {stale ? t("review.stale") : t("review.inReview")}
           </span>
           <span className="font-mono-ui text-[9px] text-[var(--faint)]">
             {ordinalLabel(nextOrdinal(proposal.baseSnapshot))}
@@ -113,9 +109,7 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
         <h3 className="mt-2.5 text-[16px] leading-tight font-bold tracking-tight">
           {intent.title}
         </h3>
-        <p className="mt-2 text-[10.5px] leading-relaxed text-[var(--muted)]">
-          {intent.goal}
-        </p>
+        <p className="mt-2 text-[10.5px] leading-relaxed text-[var(--muted)]">{intent.goal}</p>
       </section>
 
       <div className="grid grid-cols-3 gap-1.5">
@@ -155,6 +149,11 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
               </span>
               <div className="min-w-0">
                 <div className="text-[10px] font-semibold leading-snug">{task.title}</div>
+                {task.files?.length ? (
+                  <div className="mt-1 text-[8px] leading-relaxed text-[var(--muted)]">
+                    {t("common.files")}: {task.files.join(", ")}
+                  </div>
+                ) : null}
                 {task.acceptance.length > 0 ? (
                   <div className="mt-1 space-y-0.5">
                     {task.acceptance.map((item) => (
@@ -176,8 +175,7 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
 
       <section>
         <div className="panel-title mb-2">
-          {t("review.nodeIntents")}{" "}
-          <span className="text-[var(--faint)]">({nodes.length})</span>
+          {t("review.nodeIntents")} <span className="text-[var(--faint)]">({nodes.length})</span>
         </div>
         {nodes.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--border)] px-3 py-2.5 text-[9px] leading-relaxed text-[var(--faint)]">
@@ -238,9 +236,7 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
                   <div className="flex items-start gap-1.5">
                     <RiskIcon level={risk.level} />
                     <div className="min-w-0">
-                      <div className="text-[10px] font-semibold leading-snug">
-                        {copy.title}
-                      </div>
+                      <div className="text-[10px] font-semibold leading-snug">{copy.title}</div>
                       <div className="mt-0.5 text-[9px] leading-relaxed text-[var(--faint)]">
                         {copy.detail}
                       </div>
@@ -375,11 +371,7 @@ export function ReviewDialog() {
                     : t("review.approveHint")
               }
             >
-              {busy === t("busy.approving") ? (
-                <Spinner size={12} />
-              ) : (
-                <ShieldCheck size={13} />
-              )}
+              {busy === t("busy.approving") ? <Spinner size={12} /> : <ShieldCheck size={13} />}
               {proposal.architectureOnly
                 ? t("review.approveArchitecture")
                 : t("review.approveImplement")}

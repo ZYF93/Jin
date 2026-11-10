@@ -12,6 +12,8 @@
 - 扫描项目并生成架构图：**L0 模块**和 **L1 文件或组件**。语言服务器可补充符号事实和源码跳转信息。
 - 根据需求生成 Intent，并描述受影响架构节点在项目中的真实职责。
 - 在实施前展示架构变更供用户审阅；只有批准后才开始实现。
+- 审批任务同时绑定验收条件和可修改文件。最多三个文件范围互不重叠的任务会并行交给独立工作副本；集成时会检测同一文件上的并发修改，避免覆盖。
+- 实现写回前会检查文件范围并逐项复核已批准的验收条件；补丁校验失败或验收不通过时不会修改项目源码。
 - 编写代码前检索已有实现供复用，完成后重新扫描并报告架构偏差。
 - 将团队共享的架构历史保存在 `.jin/wal.jsonl`，可通过普通 Git 工作流审阅和合并。
 - 支持 OpenAI 兼容接口和 Ollama。可以从 Provider 刷新模型列表，也可以手动输入列表里没有的模型 ID。
@@ -21,11 +23,11 @@
 
 从 [GitHub Releases](https://github.com/ZYF93/Jin/releases) 下载适用于你操作系统的安装包。
 
-| 平台 | Release 文件 |
-| --- | --- |
-| Windows | `Jin-Windows-<版本>-Setup.exe` |
-| macOS | `Jin-Mac-<版本>-Installer.dmg` 或 `.zip` |
-| Linux | `Jin-Linux-<版本>.AppImage` 或 `.deb` |
+| 平台    | Release 文件                             |
+| ------- | ---------------------------------------- |
+| Windows | `Jin-Windows-<版本>-Setup.exe`           |
+| macOS   | `Jin-Mac-<版本>-Installer.dmg` 或 `.zip` |
+| Linux   | `Jin-Linux-<版本>.AppImage` 或 `.deb`    |
 
 macOS Release 同时提供 DMG 和 ZIP。已打包的应用默认从 GitHub Releases 检查更新；也可以在设置中改用通用更新源。
 

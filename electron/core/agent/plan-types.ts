@@ -75,6 +75,7 @@ export type PlannedOp =
 export interface PlannedTask {
   title: string;
   acceptance: string[];
+  files?: string[];
   dependsOn?: string[];
 }
 

@@ -96,6 +96,8 @@ export interface IntentTask {
   status: "pending" | "in_progress" | "done" | "blocked";
   dependsOn: string[];
   acceptance: string[];
+  /** Project-relative implementation paths approved for this task. */
+  files?: string[];
 }
 
 export interface NodeIntent {

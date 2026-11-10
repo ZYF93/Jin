@@ -1,4 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
@@ -99,6 +106,16 @@ describe("StagedWorkspace", () => {
     const workspace = new StagedWorkspace(root);
     workspace.stageDelete("src/counter.ts");
     expect(() => workspace.read("src/counter.ts")).toThrow(/deleted/);
+  });
+
+  it("refuses to read through a symlink that escapes the workspace", () => {
+    const root = fixture();
+    const outside = mkdtempSync(join(tmpdir(), "jin-eko-outside-"));
+    roots.push(outside);
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    symlinkSync(outside, join(root, "src", "outside"), "dir");
+    const workspace = new StagedWorkspace(root);
+    expect(() => workspace.read("src/outside/secret.txt")).toThrow(/outside the workspace/);
   });
 });
 

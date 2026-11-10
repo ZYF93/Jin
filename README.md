@@ -12,6 +12,8 @@
 - Scans a project into an architecture map with **L0 modules** and **L1 files or components**. LSP servers add symbol facts and source navigation where available.
 - Creates an intent for a request, including the responsibilities of the affected architecture nodes.
 - Shows the proposed architecture changes for review. Approval is required before implementation starts.
+- Approval binds task acceptance criteria and writable file paths. Up to three tasks with disjoint file scopes run in isolated workspaces; integration detects concurrent edits to the same file instead of overwriting them.
+- Before changes reach the project, Jin checks the approved file scope and independently reviews each acceptance criterion. Invalid patches or failed reviews leave project source files unchanged.
 - Searches existing code for reuse before writing, then rescans and reports architecture drift after implementation.
 - Keeps the shared architecture history in `.jin/wal.jsonl`, so it can be reviewed and merged with normal Git workflows.
 - Connects to OpenAI-compatible APIs or Ollama. Model lists can be refreshed from the provider, and a custom model ID can be entered if it is not listed.
@@ -21,11 +23,11 @@
 
 Download the installer for your operating system from [GitHub Releases](https://github.com/ZYF93/Jin/releases).
 
-| Platform | Release files |
-| --- | --- |
-| Windows | `Jin-Windows-<version>-Setup.exe` |
-| macOS | `Jin-Mac-<version>-Installer.dmg` or `.zip` |
-| Linux | `Jin-Linux-<version>.AppImage` or `.deb` |
+| Platform | Release files                               |
+| -------- | ------------------------------------------- |
+| Windows  | `Jin-Windows-<version>-Setup.exe`           |
+| macOS    | `Jin-Mac-<version>-Installer.dmg` or `.zip` |
+| Linux    | `Jin-Linux-<version>.AppImage` or `.deb`    |
 
 The macOS release includes both a disk image and a ZIP archive. Packaged builds check GitHub Releases for updates by default; the Settings panel can override this with a generic update feed.
 

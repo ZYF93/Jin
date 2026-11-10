@@ -51,6 +51,7 @@ import type {
   WalInfo,
 } from "../../shared/ipc";
 import { commitFileTransaction, type StagedFileEdit } from "./agent/file-transaction";
+import { reviewProposalAcceptance } from "./agent/acceptance";
 import {
   applyIntent,
   applyTouch,
@@ -99,6 +100,17 @@ import { evaluateReuse } from "./rag/reuse-guard";
 import { UsageLedger, type UsageSource } from "./metrics/usage";
 import { computeProjectMetrics } from "./metrics/metrics";
 import { normalizeProjectPath, runEkoCoder } from "./agent/eko-runtime";
+import {
+  implementationScopePaths,
+  implementationTaskPaths,
+  independentImplementationTasks,
+} from "./agent/implementation-scope";
+import {
+  createImplementationWorkspace,
+  disposeImplementationWorkspace,
+  assertIntegrationBaselines,
+  withProjectWriteLock,
+} from "./agent/workspace";
 import { applyUnifiedPatchFile, parseUnifiedPatch } from "./agent/patch";
 import { SkillManager } from "./skills/manager";
 import { McpManager } from "./mcp/manager";
@@ -995,13 +1007,17 @@ export class ProjectSession {
     versionId: string,
     nodeIntents: Intent["nodeIntents"],
   ): Intent {
+    const taskIds = new Map(plan.tasks.map((task) => [task.title, ulid()]));
     const tasks: IntentTask[] = plan.tasks.length
       ? plan.tasks.map((task) => ({
-          id: ulid(),
+          id: taskIds.get(task.title) ?? ulid(),
           title: task.title,
           status: "pending",
-          dependsOn: [],
+          dependsOn: (task.dependsOn ?? []).map(
+            (dependency) => taskIds.get(dependency) ?? dependency,
+          ),
           acceptance: task.acceptance,
+          files: task.files,
         }))
       : [
           {
@@ -1684,13 +1700,14 @@ export class ProjectSession {
     return this.getState();
   }
 
-  private fileContext(paths: readonly string[], maxChars = 80_000): string {
+  private fileContext(paths: readonly string[], maxChars = 80_000, root = this.root): string {
     const chunks: string[] = [];
     let total = 0;
     for (const path of unique(paths)) {
       if (total >= maxChars) break;
       try {
-        const content = readFileSync(join(this.root, path), "utf8");
+        const target = this.safeWritePath(path, root);
+        const content = readFileSync(target.absolute, "utf8");
         const budget = Math.min(28_000, maxChars - total);
         const slice = content.slice(0, budget);
         chunks.push(
@@ -1704,9 +1721,12 @@ export class ProjectSession {
     return chunks.join("\n\n");
   }
 
-  private safeWritePath(relativePath: string): { relative: string; absolute: string } {
+  private safeWritePath(
+    relativePath: string,
+    root = this.root,
+  ): { relative: string; absolute: string } {
     const clean = normalizeProjectPath(relativePath);
-    const rootReal = resolve(this.root);
+    const rootReal = resolve(root);
     const absolute = resolve(rootReal, clean);
     if (absolute !== rootReal && !absolute.startsWith(`${rootReal}${sep}`)) {
       throw new Error(this.t("error.pathEscapesRoot", { path: relativePath }));
@@ -1738,8 +1758,10 @@ export class ProjectSession {
 
   private async implementVersion(proposal: InternalProposal): Promise<void> {
     if (this.abortController) this.abortController.abort();
-    this.abortController = new AbortController();
-    const signal = this.abortController.signal;
+    const controller = new AbortController();
+    this.abortController = controller;
+    const signal = controller.signal;
+    let implementationWorkspace: string | null = null;
     const provider = this.deps.settings.providerConfig();
     if (!isProviderConfigured(provider)) {
       this.agentStatus = { phase: "error", message: this.t("session.noProvider") };
@@ -1754,6 +1776,8 @@ export class ProjectSession {
     this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
     try {
       await this.ensureScan(signal);
+      const workspace = createImplementationWorkspace(this.root);
+      implementationWorkspace = workspace;
       const reusePlan =
         proposal.reusePlan ?? this.rag.plan(`${proposal.intent.title}\n${proposal.intent.goal}`);
       proposal.reusePlan = reusePlan;
@@ -1774,7 +1798,6 @@ export class ProjectSession {
         if (target?.file) wantedPaths.add(target.file);
       }
       for (const candidate of reusePlan.candidates.slice(0, 6)) wantedPaths.add(candidate.path);
-      const context = this.fileContext([...wantedPaths]);
       const skills = this.skills.promptFor(`${proposal.intent.title}\n${proposal.intent.goal}`);
       const customSystem = `You are Jin's implementation agent. The architecture has already been approved by a human; code must conform to it.
 Rules:
@@ -1783,8 +1806,9 @@ Rules:
 - Use complete file contents only for new files, or when a patch cannot represent the change.
 - Never modify .jin/, .git/, node_modules/, dist/, dist-electron/, or release/.
 - Keep the change scoped to the approved Intent and Ops.
-- You may add tests and small internal helpers when needed.
-- Return strict JSON only: {"summary":"...","edits":[{"path":"relative/file.ts","patch":"--- a/relative/file.ts\\n+++ b/relative/file.ts\\n@@ ..."}],"notes":["..."]}
+- Keep edits within the approved files or their conventional test companions. Do not add helper files unless they are explicitly present in the approved architecture scope.
+- Return strict JSON only: {"summary":"...","edits":[{"path":"relative/file.ts","patch":"--- a/relative/file.ts\\n+++ b/relative/file.ts\\n@@ -1,1 +1,1 @@\\n-old line\\n+new line\\n"}],"notes":["..."]}
+- Every hunk header must use exact old/new line counts. Never write placeholder text such as @@ dot-dot-dot; include complete context, removed, and added lines.
 - A patch edit may include a separate "path" when the patch contains hunks only.
 - Use {"path":"...","delete":true} to delete a file. Only invent full "content" for new files.
 - If an approved file cannot be implemented, explain it in notes rather than inventing unrelated files.`;
@@ -1793,28 +1817,61 @@ Rules:
 - Use architecture to re-read the approved L0/L1/facet graph and structural ops before editing.
 - Use search_code before writing a new component, hook, service or helper; reuse an existing unit when it fits.
 - Use read_file to inspect current source. Use apply_patch for existing files; every edit is a unified diff and is staged virtually.
+- Keep unified-diff hunk line counts exact. Never use placeholder hunk headers; if apply_patch rejects a patch, regenerate it from the current file contents.
 - Use write_file only for new files or when a patch cannot represent the change.
 - Use delete_file for approved removals. All edits are staged virtually; they are applied atomically after the run.
 - Use run_shell for bounded project checks or inspection. Commands must stay inside the project, time out quickly, and are audited in .jin/cache/shell-audit.jsonl.
 - Never modify .jin/, .git/, node_modules/, dist/, dist-electron/, or release/. The tools reject those paths.
-- Keep the change scoped to the approved Intent and Ops. You may add tests and small internal helpers when needed.
+- Keep the change within approved files or their conventional test companions. Do not add helper files unless they are explicitly present in the approved architecture scope.
 - Work until the implementation is complete, then finish with a short plain-text summary of what changed.
 - If an approved file cannot be implemented, explain why in the summary instead of inventing unrelated files.`;
       const settings = this.deps.settings.get();
-      const sharedTask = [
-        `Intent:\n${JSON.stringify(proposal.intent, null, 2)}`,
-        `Approved structural ops:\n${JSON.stringify(proposal.ops, null, 2)}`,
-        `Touch records:\n${JSON.stringify(proposal.touches, null, 2)}`,
-        `ReusePlan:\n${JSON.stringify(reusePlan, null, 2)}`,
-        skills ? `Skills:\n${skills}` : "",
-        context
-          ? `Existing source context:\n${context}`
-          : "No existing source files were selected.",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+      const allowedPaths = implementationScopePaths(
+        proposal.intent,
+        proposal.ops,
+        proposal.touches,
+        proposal.targetSnapshot,
+        proposal.baseSnapshot,
+      );
+      if (allowedPaths.size === 0) {
+        throw new Error("The approved architecture proposal does not authorize any source paths.");
+      }
+      const independentTasks = independentImplementationTasks(proposal.intent.tasks);
+      const assignedTasks: Array<IntentTask | null> = independentTasks
+        ? [...independentTasks]
+        : [null];
+      const workerInput = (
+        task: IntentTask | null,
+      ): { text: string; scope: ReadonlySet<string> } => {
+        const workerIntent = task ? { ...proposal.intent, tasks: [task] } : proposal.intent;
+        const readPaths = task
+          ? unique([
+              ...task.files!,
+              ...reusePlan.candidates.slice(0, 6).map((candidate) => candidate.path),
+            ])
+          : unique([...wantedPaths]);
+        const workerContext = this.fileContext(readPaths, 80_000, workspace);
+        return {
+          text: [
+            `Intent:\n${JSON.stringify(workerIntent, null, 2)}`,
+            `Approved structural ops:\n${JSON.stringify(proposal.ops, null, 2)}`,
+            `Touch records:\n${JSON.stringify(proposal.touches, null, 2)}`,
+            `ReusePlan:\n${JSON.stringify(reusePlan, null, 2)}`,
+            task
+              ? `Assigned task:\n${JSON.stringify(task, null, 2)}\nOnly implement this task in these approved paths: ${task.files?.join(", ")}`
+              : "Implement the approved Intent and all its tasks.",
+            skills ? `Skills:\n${skills}` : "",
+            workerContext
+              ? `Existing source context:\n${workerContext}`
+              : "No existing source files were selected.",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          scope: task ? implementationTaskPaths(task.files ?? []) : allowedPaths,
+        };
+      };
       const warnings: string[] = [];
-      let rawEdits: unknown[] = [];
+      let rawEditBatches: Array<{ edits: unknown[]; scope: ReadonlySet<string> }> = [];
       let summary = "";
       let notes: string[] = [];
       let usedRuntime: "custom" | "eko" = "custom";
@@ -1826,48 +1883,81 @@ Rules:
         this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
         this.startStream(this.t("chat.streamImplementing"), proposal.id);
         try {
-          const eko = await runEkoCoder({
-            root: this.root,
-            provider: provider as ProviderConfig,
-            system: ekoSystem,
-            task: `${sharedTask}\n\nImplement the approved architecture now using the staging tools. Finish with a short summary.`,
-            temperature: settings.agent.temperature,
-            maxTokens: settings.agent.maxTokens,
-            signal,
-            snapshot: this.snapshot,
-            intent: proposal.intent,
-            ops: proposal.ops,
-            reusePlan,
-            searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
-            onUsage: (usage) => this.recordUsage("eko", provider.model, usage),
-            onText: (text, done) => {
-              if (signal.aborted) return;
-              this.updateStream(text, {
-                label: this.t("chat.streamImplementing"),
-                phase: done ? "thinking" : "responding",
-              });
-            },
-            onProgress: (message) => {
-              if (signal.aborted) return;
-              this.agentStatus = { ...this.agentStatus, message };
-              this.updateStream(this.stream?.content ?? "", {
-                label: message,
-                phase: "thinking",
-              });
-              this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
-            },
-          });
-          if (eko.edits.length > 0) {
-            rawEdits = eko.edits;
-            summary = eko.summary;
-            notes = eko.notes;
-            warnings.push(...eko.warnings);
-            usedRuntime = "eko";
-          } else {
-            warnings.push(...eko.warnings, this.t("session.ekoNoChanges"));
-          }
+          const settled = await Promise.allSettled(
+            assignedTasks.map(async (task, index) => {
+              const worker = workerInput(task);
+              const workerLabel = task
+                ? `[${index + 1}/${assignedTasks.length}] ${task.title}`
+                : "Eko";
+              const workerWorkspace =
+                assignedTasks.length === 1 ? workspace : createImplementationWorkspace(workspace);
+              try {
+                const eko = await runEkoCoder({
+                  root: workerWorkspace,
+                  provider: provider as ProviderConfig,
+                  system: ekoSystem,
+                  task: `${worker.text}\n\nImplement only the assigned task using the staging tools. Finish with a short summary.`,
+                  temperature: settings.agent.temperature,
+                  maxTokens: settings.agent.maxTokens,
+                  signal,
+                  snapshot: this.snapshot,
+                  intent: task ? { ...proposal.intent, tasks: [task] } : proposal.intent,
+                  ops: proposal.ops,
+                  reusePlan,
+                  searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
+                  onUsage: (usage) => this.recordUsage("eko", provider.model, usage),
+                  onText: (text, done) => {
+                    if (signal.aborted) return;
+                    this.updateStream(text, {
+                      label: `${workerLabel} · ${this.t("chat.streamImplementing")}`,
+                      phase: done ? "thinking" : "responding",
+                    });
+                  },
+                  onProgress: (message) => {
+                    if (signal.aborted) return;
+                    this.agentStatus = {
+                      ...this.agentStatus,
+                      message: `${workerLabel}: ${message}`,
+                    };
+                    this.updateStream(this.stream?.content ?? "", {
+                      label: `${workerLabel}: ${message}`,
+                      phase: "thinking",
+                    });
+                    this.deps.emit({
+                      type: "agent",
+                      status: this.agentStatus,
+                      state: this.getState(),
+                    });
+                  },
+                });
+                if (eko.edits.length === 0) {
+                  throw new Error(`Task ${index + 1} did not stage any source changes.`);
+                }
+                return { worker, eko };
+              } finally {
+                if (workerWorkspace !== workspace) disposeImplementationWorkspace(workerWorkspace);
+              }
+            }),
+          );
+          const failedWorker = settled.find((result) => result.status === "rejected");
+          if (failedWorker?.status === "rejected") throw failedWorker.reason;
+          const workerResults = settled.flatMap((result) =>
+            result.status === "fulfilled" ? [result.value] : [],
+          );
+          rawEditBatches = workerResults.map(({ worker, eko }) => ({
+            edits: eko.edits,
+            scope: worker.scope,
+          }));
+          summary = workerResults
+            .map(({ eko }) => eko.summary)
+            .filter(Boolean)
+            .join("\n");
+          notes = workerResults.flatMap(({ eko }) => eko.notes);
+          warnings.push(...workerResults.flatMap(({ eko }) => eko.warnings));
+          usedRuntime = "eko";
         } catch (error) {
           if (signal.aborted) throw error;
+          rawEditBatches = [];
           warnings.push(
             this.t("session.ekoFailed", {
               message: error instanceof Error ? error.message : String(error),
@@ -1878,35 +1968,55 @@ Rules:
       this.finishStream();
       if (usedRuntime === "custom") {
         this.startStream(this.t("chat.streamImplementing"), proposal.id);
-        let raw = "";
-        const json = await completeJson(
-          provider as ProviderConfig,
-          customSystem,
-          `${sharedTask}\n\nReturn the JSON object now.`,
-          {
-            temperature: settings.agent.temperature,
-            maxTokens: settings.agent.maxTokens,
-            json: true,
-            signal,
-            onUsage: (usage) => this.recordUsage("implement", provider.model, usage),
-            onDelta: (delta) => {
-              if (signal.aborted) return;
-              raw += delta;
-              const preview = streamingPreview(raw, ["summary", "notes", "message"]);
-              if (preview) {
-                this.updateStream(preview, {
-                  label: this.t("chat.streamImplementing"),
-                  phase: "responding",
-                });
-              }
-            },
-          },
+        const results = await Promise.all(
+          assignedTasks.map(async (task) => {
+            const worker = workerInput(task);
+            let raw = "";
+            const json = await completeJson(
+              provider as ProviderConfig,
+              customSystem,
+              `${worker.text}\n\nReturn the JSON object now.`,
+              {
+                temperature: settings.agent.temperature,
+                maxTokens: settings.agent.maxTokens,
+                json: true,
+                signal,
+                onUsage: (usage) => this.recordUsage("implement", provider.model, usage),
+                onDelta: (delta) => {
+                  if (signal.aborted) return;
+                  raw += delta;
+                  const preview = streamingPreview(raw, ["summary", "notes", "message"]);
+                  if (preview) {
+                    this.updateStream(preview, {
+                      label: task
+                        ? `[${assignedTasks.indexOf(task) + 1}/${assignedTasks.length}] ${task.title}: ${this.t("chat.streamImplementing")}`
+                        : this.t("chat.streamImplementing"),
+                      phase: "responding",
+                    });
+                  }
+                },
+              },
+            );
+            return {
+              scope: worker.scope,
+              edits: Array.isArray(json.edits) ? json.edits : [],
+              summary: typeof json.summary === "string" ? json.summary : "",
+              notes: Array.isArray(json.notes)
+                ? json.notes.filter((note): note is string => typeof note === "string")
+                : [],
+            };
+          }),
         );
-        rawEdits = Array.isArray(json.edits) ? json.edits : [];
-        summary = typeof json.summary === "string" ? json.summary : "";
-        notes = Array.isArray(json.notes)
-          ? json.notes.filter((note): note is string => typeof note === "string")
-          : [];
+        const emptyWorker = results.find((result) => result.edits.length === 0);
+        if (emptyWorker && assignedTasks.length > 1) {
+          throw new Error("An assigned implementation task returned no file edits.");
+        }
+        rawEditBatches = results.map(({ scope, edits }) => ({ edits, scope }));
+        summary = results
+          .map((result) => result.summary)
+          .filter(Boolean)
+          .join("\n");
+        notes = results.flatMap((result) => result.notes);
         this.finishStream();
       }
       const changedFiles: string[] = [];
@@ -1944,90 +2054,98 @@ Rules:
           originalContent: original.content,
         });
       };
-      for (const raw of rawEdits) {
-        if (signal.aborted) throw new Error(this.t("error.implementationCancelled"));
-        if (typeof raw !== "object" || raw === null) {
-          editErrors.push("The model returned an edit that is not an object.");
-          continue;
-        }
-        const edit = raw as Record<string, unknown>;
-        const path = typeof edit.path === "string" ? edit.path : "";
-        if (typeof edit.patch === "string" && edit.patch.trim()) {
-          let patchedFiles;
-          try {
-            patchedFiles = parseUnifiedPatch(edit.patch, path || undefined);
-          } catch (error) {
-            editErrors.push(
-              this.t("session.patchFailed", {
-                path: path || this.t("common.patch"),
-                message: error instanceof Error ? error.message : String(error),
-              }),
-            );
+      for (const batch of rawEditBatches)
+        for (const raw of batch.edits) {
+          if (signal.aborted) throw new Error(this.t("error.implementationCancelled"));
+          if (typeof raw !== "object" || raw === null) {
+            editErrors.push("The model returned an edit that is not an object.");
             continue;
           }
-          for (const file of patchedFiles) {
-            let target;
+          const edit = raw as Record<string, unknown>;
+          const path = typeof edit.path === "string" ? edit.path : "";
+          if (typeof edit.patch === "string" && edit.patch.trim()) {
+            let patchedFiles;
             try {
-              target = this.safeWritePath(file.path);
+              patchedFiles = parseUnifiedPatch(edit.patch, path || undefined);
             } catch (error) {
               editErrors.push(
                 this.t("session.patchFailed", {
-                  path: file.path,
+                  path: path || this.t("common.patch"),
                   message: error instanceof Error ? error.message : String(error),
                 }),
               );
               continue;
             }
-            const current = currentFile(target);
-            if (file.isNew && current.exists) {
-              editErrors.push(this.t("session.skippedExisting", { path: file.path }));
-              continue;
-            }
-            if (!file.isNew && !file.isDelete && !current.exists) {
-              editErrors.push(this.t("session.skippedMissing", { path: file.path }));
-              continue;
-            }
-            try {
-              const patched = applyUnifiedPatchFile(current.content, file);
-              if (patched === null) {
-                if (current.exists) stageFile(target, null);
+            for (const file of patchedFiles) {
+              let target;
+              try {
+                if (!batch.scope.has(file.path)) {
+                  throw new Error(`Path is outside this agent's approved task scope: ${file.path}`);
+                }
+                target = this.safeWritePath(file.path, implementationWorkspace);
+              } catch (error) {
+                editErrors.push(
+                  this.t("session.patchFailed", {
+                    path: file.path,
+                    message: error instanceof Error ? error.message : String(error),
+                  }),
+                );
                 continue;
               }
-              if (Buffer.byteLength(patched, "utf8") > MAX_EDIT_BYTES) {
-                editErrors.push(this.t("session.skippedTooLarge", { path: file.path }));
+              const current = currentFile(target);
+              if (file.isNew && current.exists) {
+                editErrors.push(this.t("session.skippedExisting", { path: file.path }));
                 continue;
               }
-              stageFile(target, patched);
-            } catch (error) {
-              editErrors.push(
-                this.t("session.patchFailed", {
-                  path: file.path,
-                  message: error instanceof Error ? error.message : String(error),
-                }),
-              );
+              if (!file.isNew && !file.isDelete && !current.exists) {
+                editErrors.push(this.t("session.skippedMissing", { path: file.path }));
+                continue;
+              }
+              try {
+                const patched = applyUnifiedPatchFile(current.content, file);
+                if (patched === null) {
+                  if (current.exists) stageFile(target, null);
+                  continue;
+                }
+                if (Buffer.byteLength(patched, "utf8") > MAX_EDIT_BYTES) {
+                  editErrors.push(this.t("session.skippedTooLarge", { path: file.path }));
+                  continue;
+                }
+                stageFile(target, patched);
+              } catch (error) {
+                editErrors.push(
+                  this.t("session.patchFailed", {
+                    path: file.path,
+                    message: error instanceof Error ? error.message : String(error),
+                  }),
+                );
+              }
             }
+            continue;
           }
-          continue;
+          if (!path) {
+            editErrors.push("The model returned an edit without a project-relative path.");
+            continue;
+          }
+          const safePath = normalizeProjectPath(path);
+          if (!batch.scope.has(safePath)) {
+            throw new Error(`Path is outside this agent's approved task scope: ${safePath}`);
+          }
+          const target = this.safeWritePath(safePath, implementationWorkspace);
+          if (edit.delete === true || edit.content === null) {
+            if (currentFile(target).exists) stageFile(target, null);
+            continue;
+          }
+          if (typeof edit.content !== "string") {
+            editErrors.push(this.t("session.skippedNotString", { path }));
+            continue;
+          }
+          if (Buffer.byteLength(edit.content, "utf8") > MAX_EDIT_BYTES) {
+            editErrors.push(this.t("session.skippedTooLarge", { path }));
+            continue;
+          }
+          stageFile(target, edit.content);
         }
-        if (!path) {
-          editErrors.push("The model returned an edit without a project-relative path.");
-          continue;
-        }
-        const target = this.safeWritePath(path);
-        if (edit.delete === true || edit.content === null) {
-          if (currentFile(target).exists) stageFile(target, null);
-          continue;
-        }
-        if (typeof edit.content !== "string") {
-          editErrors.push(this.t("session.skippedNotString", { path }));
-          continue;
-        }
-        if (Buffer.byteLength(edit.content, "utf8") > MAX_EDIT_BYTES) {
-          editErrors.push(this.t("session.skippedTooLarge", { path }));
-          continue;
-        }
-        stageFile(target, edit.content);
-      }
       if (editErrors.length > 0) {
         throw new Error(this.t("session.editBatchFailed", { details: editErrors.join("\n") }));
       }
@@ -2039,11 +2157,42 @@ Rules:
       if (changed.length === 0) {
         throw new Error(this.t("session.noCodeChanges"));
       }
-      commitFileTransaction(changed, {
-        writeAtomic: (absolute, content) => this.writeFileAtomic(absolute, content),
-        checkCancelled: () => {
-          if (signal.aborted) throw new Error(this.t("error.implementationCancelled"));
-        },
+      this.agentStatus = {
+        phase: "verifying",
+        message: this.t("session.verifying"),
+        versionId: proposal.id,
+      };
+      this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
+      const acceptanceCheck = await reviewProposalAcceptance({
+        provider: provider as ProviderConfig,
+        intent: proposal.intent,
+        ops: proposal.ops,
+        snapshot: proposal.targetSnapshot,
+        edits: changed,
+        signal,
+        onUsage: (usage) => this.recordUsage("implement", provider.model, usage),
+      });
+      if (acceptanceCheck.status !== "pass") {
+        throw new Error(
+          `The approved proposal acceptance review failed: ${acceptanceCheck.detail}`,
+        );
+      }
+      const integrationEdits = changed.map((edit) => {
+        const target = this.safeWritePath(edit.path, this.root);
+        return { ...edit, absolute: target.absolute };
+      });
+      await withProjectWriteLock(this.root, signal, () => {
+        assertIntegrationBaselines(integrationEdits, (edit) => {
+          const liveExists = existsSync(edit.absolute);
+          const liveContent = liveExists ? readFileSync(edit.absolute, "utf8") : "";
+          return { exists: liveExists, content: liveContent };
+        });
+        commitFileTransaction(integrationEdits, {
+          writeAtomic: (absolute, content) => this.writeFileAtomic(absolute, content),
+          checkCancelled: () => {
+            if (signal.aborted) throw new Error(this.t("error.implementationCancelled"));
+          },
+        });
       });
       for (const edit of changed) {
         changedFiles.push(edit.path);
@@ -2066,9 +2215,10 @@ Rules:
       });
       const languageCheck = this.languageCheck();
       const checks = [
+        acceptanceCheck,
         reuseCheck,
         ...(languageCheck ? [languageCheck] : []),
-        ...(await runProjectChecks(this.root)),
+        ...(await runProjectChecks(workspace)),
       ];
       const version = this.snapshot.versions[proposal.id];
       const opRecordIds = proposal.opRecordIds ?? version?.ops ?? [];
@@ -2155,7 +2305,14 @@ Rules:
       );
       this.emitState();
     } finally {
-      this.abortController = null;
+      if (this.abortController === controller) this.abortController = null;
+      if (implementationWorkspace) {
+        try {
+          disposeImplementationWorkspace(implementationWorkspace);
+        } catch {
+          // Workspace cleanup must not hide the implementation result.
+        }
+      }
     }
   }
 

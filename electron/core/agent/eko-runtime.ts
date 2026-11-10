@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import type { ArchOp, ArchSnapshot, Intent } from "../../../shared/ledger/types";
 import type { ReuseCandidate, ReusePlan } from "../../../shared/ipc";
 import { applyUnifiedPatchFile, parseUnifiedPatch } from "./patch";
@@ -14,6 +14,8 @@ export const MAX_STAGED_BYTES = 2 * 1024 * 1024;
 const MAX_READ_BYTES = 200 * 1024;
 const MAX_ARCHITECTURE_NODES = 320;
 const MAX_ARCHITECTURE_EDGES = 480;
+const MAX_EKO_STEPS = 32;
+const configuredEkoModules = new WeakSet<object>();
 
 export interface StagedEdit {
   path: string;
@@ -49,8 +51,16 @@ export class StagedWorkspace {
       if (pending.content === null) throw new Error(`File was deleted in this run: ${relative}`);
       return pending.content;
     }
-    const absolute = join(this.root, relative);
+    const rootReal = realpathSync(this.root);
+    const absolute = resolve(rootReal, relative);
+    if (absolute !== rootReal && !absolute.startsWith(`${rootReal}${sep}`)) {
+      throw new Error(`File escapes the workspace: ${relative}`);
+    }
     if (!existsSync(absolute)) throw new Error(`File does not exist: ${relative}`);
+    const real = realpathSync(absolute);
+    if (real !== rootReal && !real.startsWith(`${rootReal}${sep}`)) {
+      throw new Error(`File resolves outside the workspace: ${relative}`);
+    }
     const stats = statSync(absolute);
     if (!stats.isFile()) throw new Error(`Not a file: ${relative}`);
     if (stats.size > MAX_READ_BYTES) {
@@ -498,8 +508,10 @@ export async function runEkoCoder(
   ];
 
   const moduleConfig = module.config;
-  const previousMax = moduleConfig.maxReactNum;
-  moduleConfig.maxReactNum = 32;
+  if (!configuredEkoModules.has(module)) {
+    moduleConfig.maxReactNum = MAX_EKO_STEPS;
+    configuredEkoModules.add(module);
+  }
   const system = input.system;
   class JinAgent extends module.Agent {
     protected async extSysPrompt(): Promise<string> {
@@ -574,7 +586,6 @@ export async function runEkoCoder(
       input.signal.removeEventListener("abort", onAbort);
     }
   } finally {
-    moduleConfig.maxReactNum = previousMax;
     try {
       eko.deleteTask(taskId);
     } catch {

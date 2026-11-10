@@ -119,9 +119,7 @@ describe("planWithProvider classification", () => {
       for (const key of Object.keys(requestBody)) delete requestBody[key];
       Object.assign(
         requestBody,
-        JSON.parse(
-          typeof init?.body === "string" ? init.body : "{}",
-        ) as Record<string, unknown>,
+        JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>,
       );
       return new Response(
         JSON.stringify({
@@ -159,7 +157,14 @@ describe("planWithProvider classification", () => {
         title: "Add a unit",
         goal: "Add the unit",
         message: "Review this change",
-        tasks: [],
+        tasks: [
+          {
+            title: "Add the unit",
+            acceptance: ["The unit returns a value"],
+            files: ["src/unit.ts", "src/unit.test.ts"],
+            dependsOn: [],
+          },
+        ],
         nodeIntents: [],
         ops: [],
       },
@@ -175,6 +180,7 @@ describe("planWithProvider classification", () => {
         });
         expect(draft.kind).toBe("plan");
         expect(draft.title).toBe("Add a unit");
+        expect(draft.tasks[0]?.files).toEqual(["src/unit.ts", "src/unit.test.ts"]);
         const messages = body.messages as Array<{ role: string; content: string }>;
         const user = messages.find((message) => message.role === "user");
         expect(user?.content).toContain("Assistant: Understood.");
@@ -184,17 +190,14 @@ describe("planWithProvider classification", () => {
   });
 
   it("treats a response without a kind as a plan for compatibility", async () => {
-    await withResponse(
-      { title: "Legacy", goal: "Legacy plan", ops: [] },
-      async () => {
-        const draft = await planWithProvider(config, "Change it", {
-          snapshot: emptySnapshot(),
-          skills: "",
-          reuseSummary: "",
-        });
-        expect(draft.kind).toBe("plan");
-        expect(draft.title).toBe("Legacy");
-      },
-    );
+    await withResponse({ title: "Legacy", goal: "Legacy plan", ops: [] }, async () => {
+      const draft = await planWithProvider(config, "Change it", {
+        snapshot: emptySnapshot(),
+        skills: "",
+        reuseSummary: "",
+      });
+      expect(draft.kind).toBe("plan");
+      expect(draft.title).toBe("Legacy");
+    });
   });
 });
