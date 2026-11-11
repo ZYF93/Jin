@@ -374,6 +374,7 @@ export async function runSemanticPass(
       maxTokens: options.maxTokens ?? 4000,
       timeoutMs: options.timeoutMs ?? 60_000,
       json: true,
+      phase: "scan",
       signal: options.signal,
       onUsage: options.onUsage,
     });

@@ -11,12 +11,7 @@ import type {
   ThemeMode,
   GlassStrength,
 } from "../../../shared/ipc";
-import {
-  deleteSetting,
-  getSetting,
-  setSetting,
-  type AppDatabase,
-} from "../db/app-db";
+import { deleteSetting, getSetting, setSetting, type AppDatabase } from "../db/app-db";
 import { ulid } from "../ids/ulid";
 
 const SETTINGS_KEY = "app.settings.v1";
@@ -45,23 +40,13 @@ interface StoredSettings {
 }
 
 const THEMES: ReadonlySet<ThemeMode> = new Set(["dark", "light", "system"]);
-const GLASS: ReadonlySet<GlassStrength> = new Set([
-  "off",
-  "subtle",
-  "medium",
-  "strong",
-]);
+const GLASS: ReadonlySet<GlassStrength> = new Set(["off", "subtle", "medium", "strong"]);
 const PROVIDER_KINDS: ReadonlySet<ProviderSettings["kind"]> = new Set([
   "none",
   "openai-compatible",
   "ollama",
 ]);
-const REASONING_EFFORTS: ReadonlySet<ReasoningEffort> = new Set([
-  "auto",
-  "low",
-  "medium",
-  "high",
-]);
+const REASONING_EFFORTS: ReadonlySet<ReasoningEffort> = new Set(["auto", "low", "medium", "high"]);
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_COMPACTION_RATIO = 0.8;
 
@@ -94,7 +79,6 @@ function defaults(): StoredSettings {
       outputPricePerMillion: 0,
     },
     agent: {
-      runtime: "custom",
       semanticScan: true,
       temperature: 0.2,
       maxTokens: 8000,
@@ -133,24 +117,15 @@ function normalize(raw: unknown): StoredSettings {
   return {
     language: isLanguage(raw.language) ? raw.language : fallback.language,
     theme: THEMES.has(theme as ThemeMode) ? (theme as ThemeMode) : fallback.theme,
-    glass: GLASS.has(glass as GlassStrength)
-      ? (glass as GlassStrength)
-      : fallback.glass,
+    glass: GLASS.has(glass as GlassStrength) ? (glass as GlassStrength) : fallback.glass,
     provider: {
       kind: PROVIDER_KINDS.has(kind as ProviderSettings["kind"])
         ? (kind as ProviderSettings["kind"])
         : fallback.provider.kind,
       baseUrl:
-        typeof provider.baseUrl === "string"
-          ? provider.baseUrl.trim()
-          : fallback.provider.baseUrl,
-      model:
-        typeof provider.model === "string"
-          ? provider.model.trim()
-          : fallback.provider.model,
-      reasoningEffort: REASONING_EFFORTS.has(
-        provider.reasoningEffort as ReasoningEffort,
-      )
+        typeof provider.baseUrl === "string" ? provider.baseUrl.trim() : fallback.provider.baseUrl,
+      model: typeof provider.model === "string" ? provider.model.trim() : fallback.provider.model,
+      reasoningEffort: REASONING_EFFORTS.has(provider.reasoningEffort as ReasoningEffort)
         ? (provider.reasoningEffort as ReasoningEffort)
         : fallback.provider.reasoningEffort,
       contextWindow: Math.round(
@@ -189,11 +164,8 @@ function normalize(raw: unknown): StoredSettings {
       ),
     },
     agent: {
-      runtime: agent.runtime === "eko" ? "eko" : fallback.agent.runtime,
       semanticScan:
-        typeof agent.semanticScan === "boolean"
-          ? agent.semanticScan
-          : fallback.agent.semanticScan,
+        typeof agent.semanticScan === "boolean" ? agent.semanticScan : fallback.agent.semanticScan,
       temperature: clamp(
         typeof agent.temperature === "number" ? agent.temperature : fallback.agent.temperature,
         0,
@@ -222,17 +194,12 @@ function normalize(raw: unknown): StoredSettings {
     },
     ui: {
       reduceMotion:
-        typeof ui.reduceMotion === "boolean"
-          ? ui.reduceMotion
-          : fallback.ui.reduceMotion,
+        typeof ui.reduceMotion === "boolean" ? ui.reduceMotion : fallback.ui.reduceMotion,
     },
     updates: {
       autoCheck:
-        typeof updates.autoCheck === "boolean"
-          ? updates.autoCheck
-          : fallback.updates.autoCheck,
-      feedUrl:
-        typeof updates.feedUrl === "string" ? updates.feedUrl.trim() : "",
+        typeof updates.autoCheck === "boolean" ? updates.autoCheck : fallback.updates.autoCheck,
+      feedUrl: typeof updates.feedUrl === "string" ? updates.feedUrl.trim() : "",
     },
   };
 }
@@ -329,20 +296,12 @@ export class SettingsStore {
     if (typeof patch.providerModel === "string") {
       raw.provider.model = patch.providerModel.trim();
     }
-    if (
-      patch.providerReasoningEffort &&
-      REASONING_EFFORTS.has(patch.providerReasoningEffort)
-    ) {
+    if (patch.providerReasoningEffort && REASONING_EFFORTS.has(patch.providerReasoningEffort)) {
       raw.provider.reasoningEffort = patch.providerReasoningEffort;
     }
     if (typeof patch.providerContextWindow === "number") {
       raw.provider.contextWindow = Math.round(
-        clamp(
-          patch.providerContextWindow,
-          1_000,
-          4_000_000,
-          raw.provider.contextWindow,
-        ),
+        clamp(patch.providerContextWindow, 1_000, 4_000_000, raw.provider.contextWindow),
       );
     }
     if (typeof patch.providerCompactionRatio === "number") {
@@ -372,16 +331,11 @@ export class SettingsStore {
     if (typeof patch.semanticScan === "boolean") {
       raw.agent.semanticScan = patch.semanticScan;
     }
-    if (patch.runtime === "custom" || patch.runtime === "eko") {
-      raw.agent.runtime = patch.runtime;
-    }
     if (typeof patch.temperature === "number") {
       raw.agent.temperature = clamp(patch.temperature, 0, 2, raw.agent.temperature);
     }
     if (typeof patch.maxTokens === "number") {
-      raw.agent.maxTokens = Math.round(
-        clamp(patch.maxTokens, 512, 32000, raw.agent.maxTokens),
-      );
+      raw.agent.maxTokens = Math.round(clamp(patch.maxTokens, 512, 32000, raw.agent.maxTokens));
     }
     if (typeof patch.userName === "string" && patch.userName.trim()) {
       raw.identity.name = patch.userName.trim();
@@ -430,8 +384,7 @@ export class SettingsStore {
       apiKey: this.getProviderApiKey(),
       reasoningEffort: settings.provider.reasoningEffort ?? "auto",
       contextWindow: settings.provider.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-      compactionRatio:
-        settings.provider.compactionRatio ?? DEFAULT_COMPACTION_RATIO,
+      compactionRatio: settings.provider.compactionRatio ?? DEFAULT_COMPACTION_RATIO,
       inputPricePerMillion: settings.provider.inputPricePerMillion ?? 0,
       outputPricePerMillion: settings.provider.outputPricePerMillion ?? 0,
     };

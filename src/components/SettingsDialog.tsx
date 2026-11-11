@@ -64,7 +64,6 @@ type Draft = {
   compactionRatio: number;
   inputPrice: number;
   outputPrice: number;
-  runtime: "custom" | "eko";
   semanticScan: boolean;
   temperature: number;
   maxTokens: number;
@@ -88,7 +87,6 @@ function draftFrom(settings: AppSettings): Draft {
     compactionRatio: settings.provider.compactionRatio ?? 0.8,
     inputPrice: settings.provider.inputPricePerMillion ?? 0,
     outputPrice: settings.provider.outputPricePerMillion ?? 0,
-    runtime: settings.agent.runtime,
     semanticScan: settings.agent.semanticScan,
     temperature: settings.agent.temperature,
     maxTokens: settings.agent.maxTokens,
@@ -438,6 +436,22 @@ function ProviderTab({
   const [models, setModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsMessage, setModelsMessage] = useState<string | null>(null);
+  const [logPath, setLogPath] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.jin
+      .getLlmLogPath()
+      .then((path) => {
+        if (!cancelled) setLogPath(path);
+      })
+      .catch(() => {
+        if (!cancelled) setLogPath("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const loadModels = useCallback(async (): Promise<void> => {
     if (draft.providerKind === "none" || !draft.baseUrl.trim()) {
@@ -697,27 +711,28 @@ function ProviderTab({
       </section>
 
       <section>
-        <SectionLabel>{t("settings.agent")}</SectionLabel>
-        <div className="mt-2">
-          <div className="label">{t("settings.runtime")}</div>
-          <div className="segmented w-full">
-            {(["custom", "eko"] as const).map((runtime) => (
-              <button
-                key={runtime}
-                className={`flex-1 ${draft.runtime === runtime ? "active" : ""}`}
-                onClick={() => setDraft({ runtime })}
-              >
-                {t(runtime === "custom" ? "settings.runtime.custom" : "settings.runtime.eko")}
-              </button>
-            ))}
-          </div>
-          <div className="hint">
-            {draft.runtime === "custom"
-              ? t("settings.runtime.customHint")
-              : t("settings.runtime.ekoHint")}
-          </div>
+        <SectionLabel>{t("settings.logs")}</SectionLabel>
+        <p className="mt-1 text-[9.5px] leading-relaxed text-[var(--faint)]">
+          {t("settings.logsHint")}
+        </p>
+        <div className="mt-3 flex items-center gap-2">
+          <button className="btn h-7 text-[9px]" onClick={() => void window.jin.openLlmLogFolder()}>
+            <Terminal size={10} />
+            {t("settings.openLogsFolder")}
+          </button>
+          <code className="min-w-0 flex-1 truncate font-mono-ui text-[9px] text-[var(--faint)]">
+            {logPath || "…"}
+          </code>
         </div>
-        <label className="mt-3 flex cursor-pointer items-start gap-2.5 rounded-lg border border-[var(--border)] px-3 py-2.5">
+      </section>
+
+      <section>
+        <SectionLabel>{t("settings.agent")}</SectionLabel>
+        <div className="hint mt-1 flex items-start gap-1.5 rounded-lg border border-[var(--border)] px-3 py-2.5">
+          <Wrench size={10} className="mt-0.5 shrink-0" />
+          <span>{t("settings.toolsRequired")}</span>
+        </div>
+        <label className="mt-2 flex cursor-pointer items-start gap-2.5 rounded-lg border border-[var(--border)] px-3 py-2.5">
           <input
             type="checkbox"
             className="mt-0.5 accent-cyan-300"
@@ -1417,7 +1432,6 @@ export function SettingsDialog() {
       providerCompactionRatio: draft.compactionRatio,
       providerInputPrice: draft.inputPrice,
       providerOutputPrice: draft.outputPrice,
-      runtime: draft.runtime,
       semanticScan: draft.semanticScan,
       temperature: draft.temperature,
       maxTokens: draft.maxTokens,

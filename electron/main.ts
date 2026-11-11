@@ -56,6 +56,7 @@ import {
 } from "./core/lsp/marketplace";
 import { SettingsStore } from "./core/settings/app-settings";
 import { UpdateService } from "./core/update/update-service";
+import { currentLlmLogPath, initLlmLog, llmLogDir } from "./core/log/llm-log";
 import { fetchModelCatalog, ModelCatalogError } from "./core/agent/model-catalog";
 import {
   gitBranches,
@@ -150,7 +151,6 @@ function emptySettings(): AppSettings {
       compactionRatio: 0.8,
     },
     agent: {
-      runtime: "custom",
       semanticScan: true,
       temperature: 0.2,
       maxTokens: 8000,
@@ -687,7 +687,13 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.getSettings, (): AppSettings => requireSettings().get());
-
+  ipcMain.handle(IPC_CHANNELS.getLlmLogPath, (): string => currentLlmLogPath());
+  ipcMain.handle(IPC_CHANNELS.openLlmLogFolder, async (): Promise<void> => {
+    const dir = llmLogDir();
+    if (!dir) throw new Error(t("error.logsUnavailable"));
+    const error = await shell.openPath(dir);
+    if (error) throw new Error(error);
+  });
   ipcMain.handle(IPC_CHANNELS.saveSettings, (_event, patch: unknown): AppSettings => {
     if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
       throw new Error(t("error.settingsObject"));
@@ -1042,6 +1048,7 @@ function runPackagedSmoke(win: BrowserWindow): void {
 }
 
 function initializeApplication(): void {
+  initLlmLog(join(app.getPath("userData"), "logs"));
   appDatabase = openAppDatabase(join(app.getPath("userData"), "jin.db"));
   settingsStore = new SettingsStore(appDatabase);
   lspMarketplace = new LspMarketplace(join(app.getPath("userData"), "lsp-extensions"));

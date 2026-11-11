@@ -75,10 +75,10 @@ import { planWithProvider } from "./agent/llm-planner";
 import { normalizePlan } from "./agent/normalize-plan";
 import type { PlanDraft } from "./agent/plan-types";
 import {
-  completeJson,
   ProviderError,
   type ProviderConfig,
   type ProviderTokenUsage,
+  consumeToolsUnsupportedHint,
 } from "./agent/provider";
 import { readConfig, walPath, cachePath, type JinConfig } from "./project/config";
 import { loadWal, appendRecord, appendRecords } from "./wal/io";
@@ -1799,19 +1799,6 @@ export class ProjectSession {
       }
       for (const candidate of reusePlan.candidates.slice(0, 6)) wantedPaths.add(candidate.path);
       const skills = this.skills.promptFor(`${proposal.intent.title}\n${proposal.intent.goal}`);
-      const customSystem = `You are Jin's implementation agent. The architecture has already been approved by a human; code must conform to it.
-Rules:
-- Reuse existing code from the provided context before creating new units. Do not duplicate a component/service/hook.
-- Prefer unified-diff edits for existing files. A patch may contain one or more files with standard ---/+++ headers.
-- Use complete file contents only for new files, or when a patch cannot represent the change.
-- Never modify .jin/, .git/, node_modules/, dist/, dist-electron/, or release/.
-- Keep the change scoped to the approved Intent and Ops.
-- Keep edits within the approved files or their conventional test companions. Do not add helper files unless they are explicitly present in the approved architecture scope.
-- Return strict JSON only: {"summary":"...","edits":[{"path":"relative/file.ts","patch":"--- a/relative/file.ts\\n+++ b/relative/file.ts\\n@@ -1,1 +1,1 @@\\n-old line\\n+new line\\n"}],"notes":["..."]}
-- Every hunk header must use exact old/new line counts. Never write placeholder text such as @@ dot-dot-dot; include complete context, removed, and added lines.
-- A patch edit may include a separate "path" when the patch contains hunks only.
-- Use {"path":"...","delete":true} to delete a file. Only invent full "content" for new files.
-- If an approved file cannot be implemented, explain it in notes rather than inventing unrelated files.`;
       const ekoSystem = `You are Jin's implementation agent running inside Eko. The architecture has already been approved by a human; code must conform to it.
 Rules:
 - Use architecture to re-read the approved L0/L1/facet graph and structural ops before editing.
@@ -1874,151 +1861,82 @@ Rules:
       let rawEditBatches: Array<{ edits: unknown[]; scope: ReadonlySet<string> }> = [];
       let summary = "";
       let notes: string[] = [];
-      let usedRuntime: "custom" | "eko" = "custom";
-      if (settings.agent.runtime === "eko") {
-        this.agentStatus = {
-          ...this.agentStatus,
-          message: this.t("session.ekoImplementing"),
-        };
-        this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
-        this.startStream(this.t("chat.streamImplementing"), proposal.id);
-        try {
-          const settled = await Promise.allSettled(
-            assignedTasks.map(async (task, index) => {
-              const worker = workerInput(task);
-              const workerLabel = task
-                ? `[${index + 1}/${assignedTasks.length}] ${task.title}`
-                : "Eko";
-              const workerWorkspace =
-                assignedTasks.length === 1 ? workspace : createImplementationWorkspace(workspace);
-              try {
-                const eko = await runEkoCoder({
-                  root: workerWorkspace,
-                  provider: provider as ProviderConfig,
-                  system: ekoSystem,
-                  task: `${worker.text}\n\nImplement only the assigned task using the staging tools. Finish with a short summary.`,
-                  temperature: settings.agent.temperature,
-                  maxTokens: settings.agent.maxTokens,
-                  signal,
-                  snapshot: this.snapshot,
-                  intent: task ? { ...proposal.intent, tasks: [task] } : proposal.intent,
-                  ops: proposal.ops,
-                  reusePlan,
-                  searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
-                  onUsage: (usage) => this.recordUsage("eko", provider.model, usage),
-                  onText: (text, done) => {
-                    if (signal.aborted) return;
-                    this.updateStream(text, {
-                      label: `${workerLabel} · ${this.t("chat.streamImplementing")}`,
-                      phase: done ? "thinking" : "responding",
-                    });
-                  },
-                  onProgress: (message) => {
-                    if (signal.aborted) return;
-                    this.agentStatus = {
-                      ...this.agentStatus,
-                      message: `${workerLabel}: ${message}`,
-                    };
-                    this.updateStream(this.stream?.content ?? "", {
-                      label: `${workerLabel}: ${message}`,
-                      phase: "thinking",
-                    });
-                    this.deps.emit({
-                      type: "agent",
-                      status: this.agentStatus,
-                      state: this.getState(),
-                    });
-                  },
+      this.agentStatus = {
+        ...this.agentStatus,
+        message: this.t("session.ekoImplementing"),
+      };
+      this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
+      this.startStream(this.t("chat.streamImplementing"), proposal.id);
+      const settled = await Promise.allSettled(
+        assignedTasks.map(async (task, index) => {
+          const worker = workerInput(task);
+          const workerLabel = task ? `[${index + 1}/${assignedTasks.length}] ${task.title}` : "Eko";
+          const workerWorkspace =
+            assignedTasks.length === 1 ? workspace : createImplementationWorkspace(workspace);
+          try {
+            const eko = await runEkoCoder({
+              root: workerWorkspace,
+              provider: provider as ProviderConfig,
+              system: ekoSystem,
+              task: `${worker.text}\n\nImplement only the assigned task using the staging tools. Finish with a short summary.`,
+              temperature: settings.agent.temperature,
+              maxTokens: settings.agent.maxTokens,
+              signal,
+              snapshot: this.snapshot,
+              intent: task ? { ...proposal.intent, tasks: [task] } : proposal.intent,
+              ops: proposal.ops,
+              reusePlan,
+              searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
+              onUsage: (usage) => this.recordUsage("eko", provider.model, usage),
+              onText: (text, done) => {
+                if (signal.aborted) return;
+                this.updateStream(text, {
+                  label: `${workerLabel} · ${this.t("chat.streamImplementing")}`,
+                  phase: done ? "thinking" : "responding",
                 });
-                if (eko.edits.length === 0) {
-                  throw new Error(`Task ${index + 1} did not stage any source changes.`);
-                }
-                return { worker, eko };
-              } finally {
-                if (workerWorkspace !== workspace) disposeImplementationWorkspace(workerWorkspace);
-              }
-            }),
-          );
-          const failedWorker = settled.find((result) => result.status === "rejected");
-          if (failedWorker?.status === "rejected") throw failedWorker.reason;
-          const workerResults = settled.flatMap((result) =>
-            result.status === "fulfilled" ? [result.value] : [],
-          );
-          rawEditBatches = workerResults.map(({ worker, eko }) => ({
-            edits: eko.edits,
-            scope: worker.scope,
-          }));
-          summary = workerResults
-            .map(({ eko }) => eko.summary)
-            .filter(Boolean)
-            .join("\n");
-          notes = workerResults.flatMap(({ eko }) => eko.notes);
-          warnings.push(...workerResults.flatMap(({ eko }) => eko.warnings));
-          usedRuntime = "eko";
-        } catch (error) {
-          if (signal.aborted) throw error;
-          rawEditBatches = [];
-          warnings.push(
-            this.t("session.ekoFailed", {
-              message: error instanceof Error ? error.message : String(error),
-            }),
-          );
-        }
-      }
-      this.finishStream();
-      if (usedRuntime === "custom") {
-        this.startStream(this.t("chat.streamImplementing"), proposal.id);
-        const results = await Promise.all(
-          assignedTasks.map(async (task) => {
-            const worker = workerInput(task);
-            let raw = "";
-            const json = await completeJson(
-              provider as ProviderConfig,
-              customSystem,
-              `${worker.text}\n\nReturn the JSON object now.`,
-              {
-                temperature: settings.agent.temperature,
-                maxTokens: settings.agent.maxTokens,
-                json: true,
-                signal,
-                onUsage: (usage) => this.recordUsage("implement", provider.model, usage),
-                onDelta: (delta) => {
-                  if (signal.aborted) return;
-                  raw += delta;
-                  const preview = streamingPreview(raw, ["summary", "notes", "message"]);
-                  if (preview) {
-                    this.updateStream(preview, {
-                      label: task
-                        ? `[${assignedTasks.indexOf(task) + 1}/${assignedTasks.length}] ${task.title}: ${this.t("chat.streamImplementing")}`
-                        : this.t("chat.streamImplementing"),
-                      phase: "responding",
-                    });
-                  }
-                },
               },
-            );
-            return {
-              scope: worker.scope,
-              edits: Array.isArray(json.edits) ? json.edits : [],
-              summary: typeof json.summary === "string" ? json.summary : "",
-              notes: Array.isArray(json.notes)
-                ? json.notes.filter((note): note is string => typeof note === "string")
-                : [],
-            };
-          }),
-        );
-        const emptyWorker = results.find((result) => result.edits.length === 0);
-        if (emptyWorker && assignedTasks.length > 1) {
-          throw new Error("An assigned implementation task returned no file edits.");
-        }
-        rawEditBatches = results.map(({ scope, edits }) => ({ edits, scope }));
-        summary = results
-          .map((result) => result.summary)
-          .filter(Boolean)
-          .join("\n");
-        notes = results.flatMap((result) => result.notes);
-        this.finishStream();
-      }
+              onProgress: (message) => {
+                if (signal.aborted) return;
+                this.agentStatus = {
+                  ...this.agentStatus,
+                  message: `${workerLabel}: ${message}`,
+                };
+                this.updateStream(this.stream?.content ?? "", {
+                  label: `${workerLabel}: ${message}`,
+                  phase: "thinking",
+                });
+                this.deps.emit({
+                  type: "agent",
+                  status: this.agentStatus,
+                  state: this.getState(),
+                });
+              },
+            });
+            if (eko.edits.length === 0) {
+              throw new Error(`Task ${index + 1} did not stage any source changes.`);
+            }
+            return { worker, eko };
+          } finally {
+            if (workerWorkspace !== workspace) disposeImplementationWorkspace(workerWorkspace);
+          }
+        }),
+      );
+      const failedWorker = settled.find((result) => result.status === "rejected");
+      if (failedWorker?.status === "rejected") throw failedWorker.reason;
+      const workerResults = settled.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      rawEditBatches = workerResults.map(({ worker, eko }) => ({
+        edits: eko.edits,
+        scope: worker.scope,
+      }));
+      summary = workerResults
+        .map(({ eko }) => eko.summary)
+        .filter(Boolean)
+        .join("\n");
+      notes = workerResults.flatMap(({ eko }) => eko.notes);
+      warnings.push(...workerResults.flatMap(({ eko }) => eko.warnings));
+      this.finishStream();
       const changedFiles: string[] = [];
       const deletedFiles: string[] = [];
       const appliedEdits: Array<{ path: string; content: string }> = [];
@@ -2252,7 +2170,6 @@ Rules:
         verification.results.some((result) => result.status === "fail");
       const verified = this.snapshot.versions[proposal.id]?.status === "verified";
       const details = [
-        this.t("session.runtime", { runtime: usedRuntime }),
         this.t("session.summary", { summary: summary || this.t("common.none") }),
         ...notes,
         ...warnings,
@@ -2283,7 +2200,13 @@ Rules:
       this.emitState();
     } catch (error) {
       const cancelled = signal.aborted || (error instanceof Error && /cancel/i.test(error.message));
-      const message = this.errorMessage(error);
+      const toolsUnsupported =
+        !cancelled &&
+        ((error instanceof ProviderError && error.code === "tools-unsupported") ||
+          consumeToolsUnsupportedHint());
+      const message = toolsUnsupported
+        ? this.t("error.toolsUnsupported", { model: provider.model })
+        : this.errorMessage(error);
       this.agentStatus = cancelled
         ? this.emptyAgentStatus()
         : {
@@ -2300,7 +2223,16 @@ Rules:
             }),
         {
           proposalId: proposal.id,
-          details: error instanceof ProviderError ? error.details : undefined,
+          details: toolsUnsupported
+            ? [
+                error instanceof Error ? error.message : String(error),
+                error instanceof ProviderError ? (error.details ?? "") : "",
+              ]
+                .filter(Boolean)
+                .join("\n\n") || undefined
+            : error instanceof ProviderError
+              ? error.details
+              : undefined,
         },
       );
       this.emitState();

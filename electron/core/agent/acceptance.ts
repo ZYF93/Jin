@@ -131,6 +131,7 @@ Compare the proposed source edits against every approved criterion. Use only the
       temperature: 0,
       maxTokens: 6_000,
       json: true,
+      phase: "acceptance",
       signal: input.signal,
       onUsage: input.onUsage,
     },

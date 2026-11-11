@@ -344,6 +344,7 @@ export async function planWithProvider(
     temperature: 0.2,
     maxTokens: 8000,
     json: true,
+    phase: "plan",
     signal: context.signal,
     onUsage: context.onUsage,
     onDelta: context.onDelta,

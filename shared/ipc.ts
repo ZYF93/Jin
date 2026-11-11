@@ -87,8 +87,6 @@ export interface AppSettings {
   glass: GlassStrength;
   provider: ProviderSettings;
   agent: {
-    /** `custom` uses the deterministic patch-first JSON coder; `eko` uses a staged Eko ReAct loop. */
-    runtime: "custom" | "eko";
     /** Refine L1 kinds, responsibilities and domain tags with the configured model during a manual scan. */
     semanticScan: boolean;
     temperature: number;
@@ -128,7 +126,6 @@ export interface SettingsPatch {
   providerOutputPrice?: number;
   /** Omit to leave unchanged; pass null to delete the stored key. */
   apiKey?: string | null;
-  runtime?: "custom" | "eko";
   semanticScan?: boolean;
   temperature?: number;
   maxTokens?: number;
@@ -555,6 +552,8 @@ export const IPC_CHANNELS = {
   openInExternalEditor: "jin:open-in-external-editor",
   getSettings: "jin:get-settings",
   saveSettings: "jin:save-settings",
+  getLlmLogPath: "jin:get-llm-log-path",
+  openLlmLogFolder: "jin:open-llm-log-folder",
   getTools: "jin:get-tools",
   refreshTools: "jin:refresh-tools",
   searchExtensions: "jin:search-extensions",
@@ -607,6 +606,10 @@ export interface JinBridge {
   openInExternalEditor(path: string): Promise<void>;
   getSettings(): Promise<AppSettings>;
   saveSettings(patch: SettingsPatch): Promise<AppSettings>;
+  /** Absolute path of today's LLM diagnostics log file (JSONL). */
+  getLlmLogPath(): Promise<string>;
+  /** Reveal the LLM diagnostics log folder in the OS file manager. */
+  openLlmLogFolder(): Promise<void>;
   getTools(): Promise<ToolsInfo>;
   refreshTools(): Promise<ToolsInfo>;
   searchExtensions(query: string, limit?: number): Promise<MarketplaceSearchResult>;

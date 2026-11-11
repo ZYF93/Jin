@@ -1,11 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
+  ProviderError,
   completeJson,
   completeText,
+  consumeToolsUnsupportedHint,
+  extractReasoningDelta,
   extractUsage,
+  isToolCallRejection,
+  requestHasTools,
+  resilientProviderFetch,
   type ProviderConfig,
   type ProviderTokenUsage,
 } from "./provider";
+
+process.env.JIN_QUIET = "1";
 
 describe("extractUsage", () => {
   it("reads OpenAI chat-completion usage", () => {
@@ -250,5 +258,205 @@ describe("provider request options", () => {
     const recovered = expect(recovery).resolves.toBe("recovered");
     await vi.advanceTimersByTimeAsync(1_100);
     await recovered;
+  });
+});
+
+/** Build a text/event-stream Response that emits the given SSE blocks. */
+function sseResponse(chunks: string[]): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+const EMPTY_STREAM = [
+  'data: {"choices":[{"delta":{},"finish_reason":null}]}\n\n',
+  "data: [DONE]\n\n",
+];
+
+const REASONING_ONLY_STREAM = [
+  'data: {"model":"reasoner-1","choices":[{"delta":{"reasoning_content":"thinking..."},"finish_reason":null}]}\n\n',
+  'data: {"model":"reasoner-1","choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+  "data: [DONE]\n\n",
+];
+
+describe("empty provider streams", () => {
+  it("retries an empty stream once and succeeds", async () => {
+    let calls = 0;
+    const deltas: string[] = [];
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) return sseResponse(EMPTY_STREAM);
+      return sseResponse([
+        'data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+    }) as typeof fetch;
+
+    const text = await completeText(config(), "system", "user", {
+      onDelta: (delta) => deltas.push(delta),
+    });
+
+    expect(text).toBe("hello");
+    expect(calls).toBe(2);
+    expect(deltas).toEqual(["hello"]);
+  });
+
+  it("fails with stream diagnostics after the retry also returns no text", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return sseResponse(REASONING_ONLY_STREAM);
+    }) as typeof fetch;
+
+    let failure: ProviderErrorLike | undefined;
+    try {
+      await completeText(config(), "system", "user", { onDelta: () => undefined });
+    } catch (error) {
+      failure = error as ProviderErrorLike;
+    }
+
+    expect(calls).toBe(2);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure?.message).toBe("Provider stream returned no text");
+    expect(failure?.details).toContain("reasoning text: 11 chars (field: reasoning_content)");
+    expect(failure?.details).toContain("finish_reason: length");
+    expect(failure?.details).toContain("model: reasoner-1");
+  });
+
+  it("retries a JSON body with empty content once, then fails with the raw body", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    let failure: ProviderErrorLike | undefined;
+    try {
+      await completeText(config(), "system", "user");
+    } catch (error) {
+      failure = error as ProviderErrorLike;
+    }
+
+    expect(calls).toBe(2);
+    expect(failure?.message).toContain("no text");
+    expect(failure?.details).toContain("single JSON body");
+  });
+});
+
+interface ProviderErrorLike extends Error {
+  details?: string;
+}
+
+describe("tool call rejection detection", () => {
+  it("flags only sentences that pair a tool term with a rejection term", () => {
+    expect(isToolCallRejection("This model does not support tool calls.")).toBe(true);
+    expect(isToolCallRejection("400 Bad Request: tools are not enabled for this model")).toBe(true);
+    expect(isToolCallRejection("function calling is unavailable on this endpoint")).toBe(true);
+    expect(isToolCallRejection("Invalid API key.")).toBe(false);
+    expect(isToolCallRejection("rate limited; retry later")).toBe(false);
+    expect(isToolCallRejection("")).toBe(false);
+  });
+
+  it("detects a tools array in request bodies", () => {
+    expect(
+      requestHasTools(JSON.stringify({ model: "m", messages: [], tools: [{ type: "function" }] })),
+    ).toBe(true);
+    expect(requestHasTools(JSON.stringify({ model: "m", messages: [] }))).toBe(false);
+    expect(requestHasTools(undefined)).toBe(false);
+    expect(requestHasTools("not json")).toBe(false);
+  });
+
+  it("fails fast with a tagged error when the provider rejects tools", async () => {
+    const toolsBody = JSON.stringify({
+      model: "plain-model",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+    });
+    globalThis.fetch = (async () =>
+      new Response("400 This model does not support tool calls.", { status: 400 })) as typeof fetch;
+
+    let failure: ProviderErrorLike | undefined;
+    try {
+      await resilientProviderFetch("https://fc-reject.test/v1/chat/completions", {
+        method: "POST",
+        body: toolsBody,
+      });
+    } catch (error) {
+      failure = error as ProviderErrorLike;
+    }
+
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect((failure as { code?: string }).code).toBe("tools-unsupported");
+    expect(failure?.message).toContain("function calling");
+    expect(failure?.details).toContain("does not support tool calls");
+    expect(consumeToolsUnsupportedHint()).toBe(true);
+    expect(consumeToolsUnsupportedHint()).toBe(false);
+  });
+
+  it("passes non-tool rejections through untouched", async () => {
+    const toolsBody = JSON.stringify({
+      model: "plain-model",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+    });
+    globalThis.fetch = (async () =>
+      new Response("temperature must be a number", { status: 400 })) as typeof fetch;
+
+    const response = await resilientProviderFetch(
+      "https://fc-passthrough.test/v1/chat/completions",
+      {
+        method: "POST",
+        body: toolsBody,
+      },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).toBe("temperature must be a number");
+    expect(consumeToolsUnsupportedHint()).toBe(false);
+  });
+});
+
+describe("extractReasoningDelta", () => {
+  it("reads reasoning_content and reasoning fields", () => {
+    expect(extractReasoningDelta({ choices: [{ delta: { reasoning_content: "思考" } }] })).toEqual({
+      text: "思考",
+      field: "reasoning_content",
+    });
+    expect(extractReasoningDelta({ choices: [{ delta: { reasoning: "step 1" } }] })).toEqual({
+      text: "step 1",
+      field: "reasoning",
+    });
+  });
+
+  it("ignores plain content deltas", () => {
+    expect(extractReasoningDelta({ choices: [{ delta: { content: "answer" } }] })).toEqual({
+      text: "",
+      field: "",
+    });
+    expect(extractReasoningDelta(null)).toEqual({ text: "", field: "" });
+  });
+
+  it("keeps reasoning text out of the answer stream", async () => {
+    globalThis.fetch = (async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"reasoning_content":"hidden"},"finish_reason":null}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"visible"},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+      ])) as typeof fetch;
+
+    const deltas: string[] = [];
+    const text = await completeText(config(), "system", "user", {
+      onDelta: (delta) => deltas.push(delta),
+    });
+
+    expect(text).toBe("visible");
+    expect(deltas).toEqual(["visible"]);
   });
 });

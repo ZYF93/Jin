@@ -1,4 +1,5 @@
 import type { ProviderSettings } from "../../../shared/ipc";
+import { clipPreview, logLlm, sanitizeUrl, type LlmStreamStats } from "../log/llm-log";
 
 export interface ProviderConfig extends Omit<ProviderSettings, "hasApiKey"> {
   apiKey: string | null;
@@ -15,6 +16,8 @@ export interface CompletionOptions {
   json?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Call-site label used by the LLM diagnostics log, e.g. `plan` or `implement`. */
+  phase?: string;
   /** Best-effort token telemetry from the provider response. */
   onUsage?: (usage: ProviderTokenUsage) => void;
   /**
@@ -53,6 +56,8 @@ export class ProviderError extends Error {
     readonly status?: number,
     readonly providerName?: string,
     readonly retryAfterSeconds?: number,
+    /** Machine-readable failure class, e.g. `empty-stream`; used for retries. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ProviderError";
@@ -150,6 +155,11 @@ async function resilientFetch(
   const now = Date.now();
   if (circuit.openUntil > now) {
     const retryAfterSeconds = Math.ceil((circuit.openUntil - now) / 1000);
+    logLlm({
+      event: "error",
+      url: sanitizeUrl(url),
+      error: `circuit open, retry in ${retryAfterSeconds}s`,
+    });
     throw new ProviderError(
       `Provider circuit is open after repeated failures. Retry in ${retryAfterSeconds} seconds.`,
       undefined,
@@ -173,8 +183,58 @@ async function resilientFetch(
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+    const startedAt = Date.now();
     try {
       const response = await fetchAttempt();
+      // A deterministic "no function calling" rejection must not be retried or
+      // hidden behind SDK wrapping: detect it, tag it, and fail fast.
+      if (!response.ok && requestHasTools(init.body)) {
+        const text = await response.text().catch(() => "");
+        if (isToolCallRejection(text)) {
+          markToolsUnsupported();
+          providerCircuits.delete(circuitKey);
+          logLlm({
+            event: "error",
+            url: sanitizeUrl(url),
+            method: (init.method as string) || "GET",
+            attempt: attempt + 1,
+            status: response.status,
+            durationMs: Date.now() - startedAt,
+            error: "provider rejected tool calls (function calling)",
+          });
+          throw new ProviderError(
+            TOOLS_UNSUPPORTED_MESSAGE,
+            [
+              `Provider ${response.status} ${response.statusText}`.trim(),
+              `Model: ${modelFromBody(init.body) ?? "unknown"}`,
+              `Raw response:\n${clipPreview(text, 4_000)}`,
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+            response.status,
+            undefined,
+            undefined,
+            "tools-unsupported",
+          );
+        }
+        // Body was consumed for inspection; hand back an equivalent response.
+        return new Response(text, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      }
+      logLlm({
+        event: "http",
+        url: sanitizeUrl(url),
+        method: (init.method as string) || "GET",
+        attempt: attempt + 1,
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+        requestBytes: bodyByteLength(init.body),
+        responseBytes: contentLength(response),
+        model: modelFromBody(init.body),
+      });
       if (response.ok || !isTransientStatus(response.status)) {
         providerCircuits.delete(circuitKey);
         return response;
@@ -191,6 +251,14 @@ async function resilientFetch(
       }
       await response.body?.cancel().catch(() => undefined);
     } catch (error) {
+      logLlm({
+        event: "error",
+        url: sanitizeUrl(url),
+        method: (init.method as string) || "GET",
+        attempt: attempt + 1,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
       if (signal.aborted) throw error;
       lastError = error;
       if (attempt === RETRY_DELAYS_MS.length) {
@@ -222,20 +290,123 @@ export const resilientProviderFetch: typeof fetch = async (input, init) => {
   );
 };
 
+function bodyByteLength(body: unknown): number | undefined {
+  if (typeof body === "string") return Buffer.byteLength(body, "utf8");
+  return undefined;
+}
+
+function contentLength(response: Response): number | undefined {
+  const header = response.headers.get("content-length");
+  if (!header) return undefined;
+  const value = Number(header);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+/** Best-effort model id from an OpenAI-compatible request body (for HTTP logs). */
+function modelFromBody(body: unknown): string | undefined {
+  if (typeof body !== "string" || body.length > 64_000) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    const model = (parsed as { model?: unknown })?.model;
+    return typeof model === "string" ? model : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether an OpenAI-compatible request body actually carried a `tools` array. */
+export function requestHasTools(body: unknown): boolean {
+  if (typeof body !== "string" || body.length > 64_000) return false;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    const tools = (parsed as { tools?: unknown })?.tools;
+    return Array.isArray(tools) && tools.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+const TOOL_TERMS = [
+  "tool",
+  "tool_use",
+  "tool_choice",
+  "tools",
+  "function",
+  "functions",
+  "function calling",
+];
+const REJECTION_TERMS = [
+  "not support",
+  "no support",
+  "unsupported",
+  "unavailable",
+  "doesn't support",
+  "does not support",
+  "don't support",
+  "cannot",
+  "can't",
+  "not enabled",
+  "not available",
+  "not allowed",
+  "unable to",
+  "disable",
+  "only supports",
+  "invalid",
+  "unknown",
+  "unexpected",
+  "missing",
+];
+
+/**
+ * Heuristic detection of "this endpoint/model cannot do function calling"
+ * rejections. Terms must co-occur inside one sentence so unrelated error
+ * text (invalid api key, rate limit, …) never triggers the hint.
+ */
+export function isToolCallRejection(text: string): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  for (const sentence of lower.split(/[.;\n]/)) {
+    if (
+      TOOL_TERMS.some((term) => sentence.includes(term)) &&
+      REJECTION_TERMS.some((term) => sentence.includes(term))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Timestamp until which a tool-call rejection was observed (Eko swallows errors). */
+let toolsHintUntil = 0;
+
+export function markToolsUnsupported(): void {
+  toolsHintUntil = Date.now() + 120_000;
+}
+
+/** Read-and-clear: true when a tool-call rejection was observed very recently. */
+export function consumeToolsUnsupportedHint(): boolean {
+  if (Date.now() >= toolsHintUntil) return false;
+  toolsHintUntil = 0;
+  return true;
+}
+
+const TOOLS_UNSUPPORTED_MESSAGE =
+  "The provider rejected tool calls (function calling). The implementation agent requires a tool-capable model.";
+
 function endpoint(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
 }
 
-function extractContent(value: unknown): string {
+function extractContent(value: unknown, rawBody?: string): string {
   if (typeof value !== "object" || value === null)
     throw new ProviderError("Provider returned an empty response");
   const choices = (value as { choices?: unknown }).choices;
   if (!Array.isArray(choices) || choices.length === 0) {
-    throw new ProviderError("Provider response has no choices");
+    throw new ProviderError("Provider response has no choices", rawBodyDetail(rawBody));
   }
   const message = (choices[0] as { message?: unknown }).message;
   if (typeof message !== "object" || message === null) {
-    throw new ProviderError("Provider response has no message");
+    throw new ProviderError("Provider response has no message", rawBodyDetail(rawBody));
   }
   const content = (message as { content?: unknown }).content;
   if (typeof content === "string") return content;
@@ -250,7 +421,40 @@ function extractContent(value: unknown): string {
       )
       .join("");
   }
-  throw new ProviderError("Provider response content is not text");
+  throw new ProviderError("Provider response content is not text", rawBodyDetail(rawBody));
+}
+
+/** Raw JSON body clip attached to empty/invalid response diagnostics. */
+function rawBodyDetail(rawBody?: string): string | undefined {
+  return rawBody ? `Raw response:\n${clipPreview(rawBody, 4_000)}` : undefined;
+}
+
+/** Error for a non-streaming response whose message content was empty. */
+function emptyBodyError(usageSeen: boolean, rawBody: string, phase: string): ProviderError {
+  const stats: LlmStreamStats = {
+    ...emptyStreamStats(),
+    usageSeen,
+    contentChars: 0,
+  };
+  const details = emptyStreamDetails(
+    { stats, lastEvent: clipPreview(rawBody, 2_000) },
+    "response mode: single JSON body",
+  );
+  logLlm({
+    event: "error",
+    phase,
+    error: "Provider response contained no text",
+    details,
+    stream: stats,
+  });
+  return new ProviderError(
+    "Provider response contained no text",
+    details,
+    undefined,
+    undefined,
+    undefined,
+    "empty-stream",
+  );
 }
 
 /** Text delta from one OpenAI-compatible or Ollama stream chunk. */
@@ -282,18 +486,139 @@ export function extractDelta(value: unknown): string {
 }
 
 /**
+ * Reasoning text ("thinking") that reasoning models stream alongside or
+ * instead of the answer. Jin never treats it as the response, but the
+ * diagnostics use it to explain empty streams.
+ */
+export function extractReasoningDelta(value: unknown): { text: string; field: string } {
+  if (typeof value !== "object" || value === null) return { text: "", field: "" };
+  const choices = (value as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return { text: "", field: "" };
+  const choice = choices[0] as { delta?: unknown; message?: unknown };
+  const carriers: Array<[string, unknown]> =
+    typeof choice.delta === "object" && choice.delta !== null
+      ? Object.entries(choice.delta as Record<string, unknown>)
+      : typeof choice.message === "object" && choice.message !== null
+        ? Object.entries(choice.message as Record<string, unknown>)
+        : [];
+  for (const [field, fieldValue] of carriers) {
+    if (field !== "reasoning_content" && field !== "reasoning" && field !== "thinking") continue;
+    if (typeof fieldValue === "string" && fieldValue) return { text: fieldValue, field };
+    if (Array.isArray(fieldValue)) {
+      const text = fieldValue
+        .map((part) =>
+          typeof part === "object" &&
+          part !== null &&
+          typeof (part as { text?: unknown }).text === "string"
+            ? (part as { text: string }).text
+            : "",
+        )
+        .join("");
+      if (text) return { text, field };
+    }
+  }
+  return { text: "", field: "" };
+}
+
+/** Mutable stream counters filled by `readStream` for logging and errors. */
+export interface StreamDiagnostics {
+  stats: LlmStreamStats;
+  /** Raw JSON of the last parsed SSE event, for post-mortem details. */
+  lastEvent: string;
+}
+
+function emptyStreamStats(): LlmStreamStats {
+  return {
+    events: 0,
+    deltas: 0,
+    contentChars: 0,
+    reasoningChars: 0,
+    reasoningField: "",
+    toolCallChunks: 0,
+    finishReason: "",
+    model: "",
+    usageSeen: false,
+  };
+}
+
+/** Verbose explanation attached to the "no text" failure. */
+function emptyStreamDetails(
+  diagnostics: StreamDiagnostics,
+  mode = "response mode: streaming (text/event-stream)",
+): string {
+  const { stats, lastEvent } = diagnostics;
+  const lines = [
+    "Stream diagnostics:",
+    `  ${mode}`,
+    `  SSE events: ${stats.events}, content deltas: ${stats.deltas}, content chars: ${stats.contentChars}`,
+    stats.reasoningChars > 0
+      ? `  reasoning text: ${stats.reasoningChars} chars (field: ${stats.reasoningField || "unknown"})`
+      : "  reasoning text: none",
+    `  finish_reason: ${stats.finishReason || "(never sent)"}`,
+    `  model: ${stats.model || "(unknown)"}`,
+    `  tool_call deltas: ${stats.toolCallChunks}`,
+    `  usage received: ${stats.usageSeen ? "yes" : "no"}`,
+  ];
+  if (lastEvent) lines.push("Last event:", clipPreview(lastEvent, 2_000));
+  lines.push(
+    "Likely causes:",
+    "- A reasoning model spent the whole max_tokens budget thinking and produced no final content. Raise max_tokens or disable thinking for this model.",
+    "- The provider streamed the answer inside reasoning_content/reasoning instead of content; this endpoint/model combination is not OpenAI-compatible.",
+    "- finish_reason=content_filter: the provider withheld the answer.",
+    "- The provider sent an empty or heartbeat-only stream; Jin retries once automatically.",
+  );
+  return lines.join("\n");
+}
+
+/**
  * Consume an SSE response. Handles CRLF, split chunks, `[DONE]`, usage-only
  * trailing chunks, and servers that ignore `stream:true` and return one JSON
- * body instead.
+ * body instead. When `diagnostics` is given it is filled with chunk-level
+ * counters for logging and error reporting.
  */
-export async function readStream(response: Response, options: CompletionOptions): Promise<string> {
+export async function readStream(
+  response: Response,
+  options: CompletionOptions,
+  diagnostics?: StreamDiagnostics,
+): Promise<string> {
+  const stats = diagnostics?.stats ?? emptyStreamStats();
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
-    const value = (await response.json()) as unknown;
+    const rawBody = await response.text();
+    let value: unknown;
+    try {
+      value = JSON.parse(rawBody) as unknown;
+    } catch {
+      throw new ProviderError(
+        "Provider returned invalid JSON instead of a stream",
+        `Raw response:\n${clipPreview(rawBody, 4_000)}`,
+      );
+    }
     const usage = extractUsage(value);
     if (usage) options.onUsage?.(usage);
-    const text = extractContent(value);
-    if (text) options.onDelta?.(text);
+    const text = extractContent(value, rawBody);
+    if (!text) {
+      const details = emptyStreamDetails(
+        { stats, lastEvent: clipPreview(rawBody, 2_000) },
+        `response mode: single JSON body (content-type: ${contentType || "unknown"})`,
+      );
+      logLlm({
+        event: "error",
+        phase: options.phase,
+        error: "Provider response contained no text",
+        details,
+        stream: stats,
+      });
+      throw new ProviderError(
+        "Provider response contained no text",
+        details,
+        undefined,
+        undefined,
+        undefined,
+        "empty-stream",
+      );
+    }
+    options.onDelta?.(text);
     return text;
   }
   if (!response.body) throw new ProviderError("Provider returned an empty stream");
@@ -326,10 +651,27 @@ export async function readStream(response: Response, options: CompletionOptions)
           } catch {
             continue;
           }
+          stats.events += 1;
+          if (diagnostics) diagnostics.lastEvent = clipPreview(line, 2_000);
           const usage = extractUsage(value);
-          if (usage) options.onUsage?.(usage);
+          if (usage) {
+            stats.usageSeen = true;
+            options.onUsage?.(usage);
+          }
+          const model = (value as { model?: unknown }).model;
+          if (typeof model === "string" && model) stats.model = model;
+          const finish = finishReasonOf(value);
+          if (finish) stats.finishReason = finish;
+          if (hasToolCallDelta(value)) stats.toolCallChunks += 1;
+          const reasoning = extractReasoningDelta(value);
+          if (reasoning.text) {
+            stats.reasoningChars += reasoning.text.length;
+            stats.reasoningField = stats.reasoningField || reasoning.field;
+          }
           const delta = extractDelta(value);
           if (!delta) continue;
+          stats.deltas += 1;
+          stats.contentChars += delta.length;
           content += delta;
           options.onDelta?.(delta);
         }
@@ -344,10 +686,17 @@ export async function readStream(response: Response, options: CompletionOptions)
       if (line && line !== "[DONE]") {
         try {
           const value = JSON.parse(line) as unknown;
+          stats.events += 1;
+          if (diagnostics) diagnostics.lastEvent = clipPreview(line, 2_000);
           const usage = extractUsage(value);
-          if (usage) options.onUsage?.(usage);
+          if (usage) {
+            stats.usageSeen = true;
+            options.onUsage?.(usage);
+          }
           const delta = extractDelta(value);
           if (delta) {
+            stats.deltas += 1;
+            stats.contentChars += delta.length;
             content += delta;
             options.onDelta?.(delta);
           }
@@ -359,8 +708,52 @@ export async function readStream(response: Response, options: CompletionOptions)
   } finally {
     await reader.cancel().catch(() => undefined);
   }
-  if (!content) throw new ProviderError("Provider stream returned no text");
+  if (!content) {
+    logLlm({
+      event: "error",
+      phase: options.phase,
+      streaming: true,
+      error: "Provider stream returned no text",
+      details: emptyStreamDetails({ stats, lastEvent: diagnostics?.lastEvent ?? "" }),
+      stream: stats,
+    });
+    throw new ProviderError(
+      "Provider stream returned no text",
+      emptyStreamDetails({ stats, lastEvent: diagnostics?.lastEvent ?? "" }),
+      undefined,
+      undefined,
+      undefined,
+      "empty-stream",
+    );
+  }
   return content;
+}
+
+function finishReasonOf(value: unknown): string {
+  const choices = (value as { choices?: unknown })?.choices;
+  if (!Array.isArray(choices) || choices.length === 0) return "";
+  const finish = (choices[0] as { finish_reason?: unknown }).finish_reason;
+  return typeof finish === "string" ? finish : "";
+}
+
+function hasToolCallDelta(value: unknown): boolean {
+  const choices = (value as { choices?: unknown })?.choices;
+  if (!Array.isArray(choices) || choices.length === 0) return false;
+  const delta = (choices[0] as { delta?: unknown }).delta;
+  if (typeof delta !== "object" || delta === null) return false;
+  const toolCalls = (delta as { tool_calls?: unknown }).tool_calls;
+  return Array.isArray(toolCalls) && toolCalls.length > 0;
+}
+
+/** One prompt preview line per message, clipped, for the diagnostics log. */
+function previewMessages(messages: Array<{ role: string; content: string }>): string {
+  const LIMITS: Record<string, number> = { system: 600, assistant: 1_200, user: 1_500 };
+  return messages
+    .map(
+      (message) => `${message.role}: ${clipPreview(message.content, LIMITS[message.role] ?? 800)}`,
+    )
+    .join("\n\n")
+    .slice(0, 4_000);
 }
 
 async function request(
@@ -377,8 +770,47 @@ async function request(
   const signal = options.signal
     ? AbortSignal.any([options.signal, controller.signal])
     : controller.signal;
+  const phase = options.phase ?? "llm";
+  const startedAt = Date.now();
+  const streaming = Boolean(options.onDelta);
+  const requestChars = messages.reduce((total, message) => total + message.content.length, 0);
+  const callBase = {
+    phase,
+    provider: config.kind,
+    model: config.model,
+    url: sanitizeUrl(endpoint(config.baseUrl)),
+  };
+  // Capture telemetry for the log without disturbing the caller's callbacks:
+  // usage is forwarded to the caller exactly once, after a successful call,
+  // so retried attempts never double-count tokens.
+  let lastUsage: ProviderTokenUsage | null = null;
+  const loggedOptions: CompletionOptions = {
+    ...options,
+    onUsage: (usage) => {
+      lastUsage = usage;
+    },
+  };
+  const forwardUsage = (): void => {
+    if (!lastUsage || !options.onUsage) return;
+    try {
+      options.onUsage(lastUsage);
+    } catch {
+      // Telemetry must never break the model call.
+    }
+  };
+  // Read through a closure: TypeScript does not track assignments made inside
+  // callbacks, so a direct read would be wrongly narrowed to `null`.
+  const usageOf = (): ProviderTokenUsage | null => lastUsage;
+  logLlm({
+    event: "request",
+    ...callBase,
+    streaming,
+    messageCount: messages.length,
+    requestChars,
+    requestPreview: previewMessages(messages),
+  });
+  let droppedFields: string[] = [];
   try {
-    const streaming = Boolean(options.onDelta);
     const body: Record<string, unknown> = {
       model: config.model,
       messages,
@@ -415,6 +847,8 @@ async function request(
       if (response.ok || response.status !== 400) break;
       await response.text().catch(() => "");
       delete body[field];
+      droppedFields = [...droppedFields, field];
+      logLlm({ event: "http", ...callBase, status: 400, error: `retrying without ${field}` });
       response = await resilientFetch(
         endpoint(config.baseUrl),
         {
@@ -431,19 +865,105 @@ async function request(
       throw providerFailure(response, text);
     }
     if (streaming) {
-      return await readStream(response, options);
+      const diagnostics: StreamDiagnostics = { stats: emptyStreamStats(), lastEvent: "" };
+      const text = await streamWithEmptyRetry(
+        response,
+        loggedOptions,
+        callBase,
+        () =>
+          resilientFetch(
+            endpoint(config.baseUrl),
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify(body),
+              signal,
+            },
+            signal,
+          ),
+        diagnostics,
+      );
+      forwardUsage();
+      logLlm({
+        event: "response",
+        ...callBase,
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+        promptTokens: usageOf()?.promptTokens,
+        completionTokens: usageOf()?.completionTokens,
+        responseChars: text.length,
+        responsePreview: clipPreview(text),
+        droppedFields: droppedFields.length ? droppedFields : undefined,
+        stream: diagnostics.stats,
+      });
+      return text;
     }
-    const value = (await response.json()) as unknown;
-    const usage = extractUsage(value);
-    if (usage && options.onUsage) {
+    const refetchJson = (): Promise<Response> =>
+      resilientFetch(
+        endpoint(config.baseUrl),
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        },
+        signal,
+      );
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const attemptResponse = attempt === 1 ? response : await refetchJson();
+      const rawBody = await attemptResponse.text();
+      let value: unknown;
       try {
-        options.onUsage(usage);
+        value = JSON.parse(rawBody) as unknown;
       } catch {
-        // Telemetry must never break the model call.
+        throw new ProviderError(
+          "Provider returned invalid JSON",
+          `Raw response:\n${clipPreview(rawBody, 4_000)}`,
+        );
       }
+      const usage = extractUsage(value);
+      if (usage) lastUsage = usage;
+      const text = extractContent(value, rawBody);
+      if (text) {
+        forwardUsage();
+        logLlm({
+          event: "response",
+          ...callBase,
+          status: attemptResponse.status,
+          durationMs: Date.now() - startedAt,
+          promptTokens: usageOf()?.promptTokens,
+          completionTokens: usageOf()?.completionTokens,
+          responseChars: text.length,
+          responsePreview: clipPreview(text),
+          droppedFields: droppedFields.length ? droppedFields : undefined,
+        });
+        return text;
+      }
+      if (attempt === 2 || signal.aborted) {
+        throw emptyBodyError(Boolean(usage), rawBody, phase);
+      }
+      logLlm({
+        event: "http",
+        ...callBase,
+        status: attemptResponse.status,
+        attempt: 2,
+        error: "empty response body, retrying once",
+      });
     }
-    return extractContent(value);
+    throw new ProviderError("Provider response contained no text");
   } catch (error) {
+    if (!(error instanceof ProviderError) || error.code !== "empty-stream") {
+      // The empty-stream error is already logged inside readStream.
+      logLlm({
+        event: "error",
+        ...callBase,
+        streaming,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+        details:
+          error instanceof ProviderError ? clipPreview(error.details ?? "", 4_000) : undefined,
+      });
+    }
     if (error instanceof ProviderError) throw error;
     if (error instanceof Error && error.name === "AbortError") {
       throw new ProviderError("Provider request was cancelled or timed out");
@@ -452,6 +972,68 @@ async function request(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * Run one streaming request; when the provider ends the stream without any
+ * content (a transient failure some servers emit under load), refetch once.
+ * A retry only happens when no delta reached the UI yet, so the visible
+ * stream is never rewound or duplicated. The final attempt's diagnostics are
+ * copied into `sink` for the response log entry.
+ */
+async function streamWithEmptyRetry(
+  response: Response,
+  options: CompletionOptions,
+  callBase: { phase?: string; provider?: string; model?: string; url?: string },
+  refetch: () => Promise<Response>,
+  sink?: StreamDiagnostics,
+): Promise<string> {
+  let forwarded = false;
+  const watched: CompletionOptions = options.onDelta
+    ? {
+        ...options,
+        onDelta: (delta) => {
+          forwarded = true;
+          options.onDelta?.(delta);
+        },
+      }
+    : options;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const attemptResponse = attempt === 1 ? response : await refetch();
+    const attemptDiagnostics: StreamDiagnostics = { stats: emptyStreamStats(), lastEvent: "" };
+    try {
+      const text = await readStream(
+        attemptResponse,
+        { ...watched, phase: options.phase },
+        attemptDiagnostics,
+      );
+      if (sink) Object.assign(sink, attemptDiagnostics);
+      return text;
+    } catch (error) {
+      if (
+        attempt === 2 ||
+        forwarded ||
+        !(error instanceof ProviderError) ||
+        error.code !== "empty-stream" ||
+        options.signal?.aborted
+      ) {
+        if (sink) Object.assign(sink, attemptDiagnostics);
+        throw error;
+      }
+      // First empty stream with nothing shown yet: transparently refetch.
+      if (sink) Object.assign(sink, attemptDiagnostics);
+      logLlm({
+        event: "http",
+        ...callBase,
+        streaming: true,
+        attempt: 2,
+        error: "empty stream, retrying once",
+        stream: attemptDiagnostics.stats,
+      });
+      forwarded = false;
+    }
+  }
+  throw new ProviderError("Provider stream returned no text");
 }
 
 export async function completeJson(

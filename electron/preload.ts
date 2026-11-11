@@ -56,6 +56,8 @@ const bridge: JinBridge = {
   getSettings: () => ipcRenderer.invoke(IPC_CHANNELS.getSettings) as Promise<AppSettings>,
   saveSettings: (patch: SettingsPatch) =>
     ipcRenderer.invoke(IPC_CHANNELS.saveSettings, patch) as Promise<AppSettings>,
+  getLlmLogPath: () => ipcRenderer.invoke(IPC_CHANNELS.getLlmLogPath) as Promise<string>,
+  openLlmLogFolder: () => ipcRenderer.invoke(IPC_CHANNELS.openLlmLogFolder) as Promise<void>,
   getTools: () => ipcRenderer.invoke(IPC_CHANNELS.getTools) as Promise<ToolsInfo>,
   refreshTools: () => ipcRenderer.invoke(IPC_CHANNELS.refreshTools) as Promise<ToolsInfo>,
   searchExtensions: (query: string, limit?: number) =>

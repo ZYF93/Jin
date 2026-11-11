@@ -464,14 +464,13 @@ const en = {
   "settings.deleteKeyTitle": "Delete stored API key on save",
   "settings.keyHint":
     "Keys are encrypted with safeStorage and only the main process can read them.",
+  "settings.logs": "Diagnostics log",
+  "settings.logsHint":
+    "Every model call is recorded here with phase, model, latency, token usage, raw stream diagnostics and provider errors. Attach this file when reporting provider problems.",
+  "settings.openLogsFolder": "Open log folder",
   "settings.agent": "Agent",
-  "settings.runtime": "Coding runtime",
-  "settings.runtime.custom": "Custom coder",
-  "settings.runtime.eko": "Eko 4.x",
-  "settings.runtime.customHint":
-    "One structured completion; complete files are applied after the response.",
-  "settings.runtime.ekoHint":
-    "Eko runs a staged ReAct tool loop. Files stay virtual until the run finishes, then the normal approval-bound writer applies them.",
+  "settings.toolsRequired":
+    "The implementation agent needs tool calls (function calling). If your model rejects tools, implementation fails with a clear error — switch to a tool-capable model.",
   "settings.semanticScan": "Refine scans with the model",
   "settings.semanticScanDetail":
     "The first project scan uses the configured provider to describe file and directory responsibilities. This option also refines later scans; structural facts stay authoritative, and symbol claims are checked against LSP data.",
@@ -893,12 +892,9 @@ const en = {
   "session.languageDiagnostics": "language diagnostics",
   "session.diagnosticsErrors": "{count} error: {details}|{count} errors: {details}",
   "session.noDiagnosticErrors": "Language servers reported no errors.",
-  "session.runtime": "Runtime: {runtime}",
   "session.summary": "Summary: {summary}",
   "session.checkLine": "{name}: {status} — {detail}",
   "session.conformanceLine": "Conformance: {evidence}",
-  "session.ekoNoChanges": "Eko staged no file changes; falling back to the custom coder.",
-  "session.ekoFailed": "Eko runtime failed: {message}. Falling back to the custom coder.",
   "session.skippedNotString": "Skipped {path}: content must be a string",
   "session.skippedTooLarge": "Skipped {path}: content exceeds 2 MB",
   "session.patchFailed": "Skipped {path}: the patch did not apply — {message}",
@@ -921,8 +917,7 @@ const en = {
   "session.syncAcceptance.amendment.1":
     "Every added or removed node reflects the current source tree",
   "session.syncAcceptance.amendment.2": "No architecture change is accepted without a graph diff",
-  "session.syncAcceptance.amendment.3":
-    "Update source code to conform to the amended architecture",
+  "session.syncAcceptance.amendment.3": "Update source code to conform to the amended architecture",
   "session.noCodeChanges": "The implementation produced no source file changes.",
   "session.syncAcceptance.import.1": "Every L0 module has a recognizable responsibility",
   "session.syncAcceptance.import.2": "L1 units map to real files",
@@ -988,6 +983,9 @@ const en = {
   "error.versionIdString": "Version id must be a string.",
   "error.filePathRequired": "A file path is required.",
   "error.settingsObject": "Settings patch must be an object.",
+  "error.logsUnavailable": "The diagnostics log is not initialized yet.",
+  "error.toolsUnsupported":
+    'The model "{model}" does not support tool calls (function calling), so the implementation agent cannot run. Open Settings → AI Provider and pick a tool-capable model (for example Claude, GPT-4.x, Gemini, Qwen3, GLM or DeepSeek-V3), then retry.',
   "error.queryString": "Search query must be a string.",
   "error.extensionId": "An extension id is required.",
   "error.marketplaceNotReady": "The VS Code Marketplace is not initialized yet.",
@@ -1074,7 +1072,6 @@ const en = {
   "verify.projectChecks": "project checks",
   "verify.reuseCheck": "reuse",
   "verify.languageDiagnostics": "language diagnostics",
-
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1508,13 +1505,13 @@ const zh: Record<MessageKey, string> = {
   "settings.willDelete": "将删除",
   "settings.deleteKeyTitle": "保存时删除已存密钥",
   "settings.keyHint": "密钥使用 safeStorage 加密，只有主进程可以读取。",
+  "settings.logs": "诊断日志",
+  "settings.logsHint":
+    "每次模型调用的阶段、模型、耗时、Token 用量、流式诊断与 Provider 原始报错都会记录在此目录；排查 Provider 问题时可直接把文件发给开发者。",
+  "settings.openLogsFolder": "打开日志文件夹",
   "settings.agent": "Agent",
-  "settings.runtime": "编码运行时",
-  "settings.runtime.custom": "自研 Coder",
-  "settings.runtime.eko": "Eko 4.x",
-  "settings.runtime.customHint": "一次结构化补全；响应后应用完整文件。",
-  "settings.runtime.ekoHint":
-    "Eko 运行分阶段 ReAct 工具循环。文件在运行结束前保持虚拟，随后由正常的批准绑定写入器应用。",
+  "settings.toolsRequired":
+    "实现代理依赖工具调用（Function Calling）：请选择支持 tools 的模型，否则实现会失败并给出明确提示。",
   "settings.semanticScan": "用模型细化扫描",
   "settings.semanticScanDetail":
     "首次扫描会使用已配置的 Provider 描述文件与目录职责。开启此项后后续扫描也会细化；结构事实保持权威，符号声明会与 LSP 数据核对。",
@@ -1914,12 +1911,9 @@ const zh: Record<MessageKey, string> = {
   "session.languageDiagnostics": "语言诊断",
   "session.diagnosticsErrors": "{count} 个错误：{details}|{count} 个错误：{details}",
   "session.noDiagnosticErrors": "语言服务器未报告错误。",
-  "session.runtime": "运行时：{runtime}",
   "session.summary": "摘要：{summary}",
   "session.checkLine": "{name}：{status} — {detail}",
   "session.conformanceLine": "一致性：{evidence}",
-  "session.ekoNoChanges": "Eko 未暂存任何文件变更；回退到自研 Coder。",
-  "session.ekoFailed": "Eko 运行时失败：{message}。回退到自研 Coder。",
   "session.skippedNotString": "跳过 {path}：内容必须是字符串",
   "session.skippedTooLarge": "跳过 {path}：内容超过 2 MB",
   "session.patchFailed": "跳过 {path}：补丁无法应用 — {message}",
@@ -1999,6 +1993,9 @@ const zh: Record<MessageKey, string> = {
   "error.versionIdString": "版本 ID 必须是字符串。",
   "error.filePathRequired": "需要文件路径。",
   "error.settingsObject": "设置补丁必须是对象。",
+  "error.logsUnavailable": "诊断日志尚未初始化。",
+  "error.toolsUnsupported":
+    "模型「{model}」不支持工具调用（Function Calling），实现代理无法运行。请在 设置 → AI Provider 中换用支持工具调用的模型（例如 Claude、GPT-4.x、Gemini、Qwen3、GLM、DeepSeek-V3），然后重试实现。",
   "error.queryString": "搜索查询必须是字符串。",
   "error.extensionId": "需要插件 ID。",
   "error.marketplaceNotReady": "VS Code 插件商店尚未初始化。",
@@ -2073,7 +2070,6 @@ const zh: Record<MessageKey, string> = {
   "verify.projectChecks": "项目检查",
   "verify.reuseCheck": "复用检查",
   "verify.languageDiagnostics": "语言诊断",
-
 };
 
 const dictionaries: Record<Language, Record<MessageKey, string>> = { en, zh };
