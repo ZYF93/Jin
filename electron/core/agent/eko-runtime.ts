@@ -220,6 +220,10 @@ export interface EkoCoderInput {
   onProgress?: (message: string) => void;
   /** Cumulative assistant text from Eko, forwarded as a transient chat stream. */
   onText?: (text: string, done: boolean) => void;
+  /** Cumulative thinking text from reasoning models, forwarded separately. */
+  onThinking?: (text: string, done: boolean) => void;
+  /** One visible tool call / result / error row for the chat activity feed. */
+  onActivity?: (entry: { tool: string; detail: string; isError?: boolean }) => void;
   /** Per-LLM-call token telemetry from Eko's stream finish events. */
   onUsage?: (usage: { promptTokens: number; completionTokens: number }) => void;
 }
@@ -242,17 +246,63 @@ export function ekoLlmConfig(input: EkoCoderInput): {
   fetch: typeof fetch;
   config: { baseURL: string; temperature: number; maxOutputTokens: number };
 } {
+  let baseURL = input.provider.baseUrl.replace(/\/+$/, "");
+  if (input.provider.kind === "anthropic") {
+    // Eko speaks the OpenAI protocol; Anthropic exposes an OpenAI-compatible
+    // layer at /v1/chat/completions (Bearer auth), so normalize the base URL.
+    baseURL = baseURL.endsWith("/v1") ? baseURL : `${baseURL}/v1`;
+  }
+  if (input.provider.kind === "gemini") {
+    // Google offers an OpenAI-compatible layer at /v1beta/openai/chat/completions.
+    const root = baseURL
+      .replace(/\/v1beta$/, "")
+      .replace(/\/v1$/, "")
+      .replace(/\/openai$/, "");
+    baseURL = `${root}/v1beta/openai`;
+  }
   return {
     provider: "openai-compatible",
     model: input.provider.model,
     apiKey: input.provider.apiKey || "jin-local",
     fetch: resilientProviderFetch,
     config: {
-      baseURL: input.provider.baseUrl,
+      baseURL,
       temperature: input.temperature,
       maxOutputTokens: input.maxTokens,
     },
   };
+}
+
+function toolArgsPreview(params: Record<string, unknown> | undefined): string {
+  if (!params || typeof params !== "object") return "";
+  if (typeof params.path === "string" && params.path) {
+    return typeof params.cwd === "string" && params.cwd
+      ? `${params.path} (in ${params.cwd})`
+      : String(params.path);
+  }
+  if (typeof params.command === "string" && params.command) {
+    return clip(params.command, 160);
+  }
+  if (typeof params.query === "string" && params.query) {
+    return clip(params.query, 160);
+  }
+  return clip(JSON.stringify(params), 140);
+}
+
+/** Compact one-line preview of a tool result for the activity feed. */
+function toolResultPreview(result: unknown): string {
+  let text = "";
+  if (typeof result === "string") text = result;
+  else if (Array.isArray((result as { content?: unknown })?.content)) {
+    text = ((result as { content: Array<{ text?: unknown }> }).content ?? [])
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("\n");
+  } else if (result !== null && typeof result === "object") {
+    text = JSON.stringify(result);
+  }
+  const trimmed = text.trim();
+  if (!trimmed) return "(empty result)";
+  return clip(trimmed, 220);
 }
 
 /**
@@ -541,9 +591,32 @@ export async function runEkoCoder(
           (message.type === "text" || message.type === "thinking") &&
           typeof message.text === "string"
         ) {
-          input.onText?.(message.text, Boolean(message.streamDone));
+          if (message.type === "thinking") {
+            input.onThinking?.(message.text, Boolean(message.streamDone));
+          } else {
+            input.onText?.(message.text, Boolean(message.streamDone));
+          }
         } else if (message.type === "tool_use" && typeof message.toolName === "string") {
           input.onProgress?.(`Eko: ${message.toolName}`);
+          input.onActivity?.({
+            tool: message.toolName,
+            detail: toolArgsPreview(message.params),
+          });
+        } else if (message.type === "tool_result" && typeof message.toolName === "string") {
+          input.onActivity?.({
+            tool: message.toolName,
+            detail: toolResultPreview(message.toolResult),
+            isError: Boolean((message.toolResult as { isError?: unknown } | undefined)?.isError),
+          });
+        } else if (message.type === "error") {
+          input.onActivity?.({
+            tool: "error",
+            detail: clip(
+              message.error instanceof Error ? message.error.message : String(message.error),
+              220,
+            ),
+            isError: true,
+          });
         } else if (message.type === "agent_start") {
           input.onProgress?.("Eko: agent started");
         } else if (message.type === "finish" && "usage" in message && message.usage) {

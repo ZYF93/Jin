@@ -6,6 +6,7 @@ import {
   Copy,
   Cpu,
   Download,
+  FileText,
   GitMerge,
   KeyRound,
   Layers3,
@@ -133,6 +134,90 @@ function updateStatusText(
         version: update.currentVersion,
       });
   }
+}
+
+function RulesSection() {
+  const t = useT();
+  const app = useJin((state) => state.app);
+  const [content, setContent] = useState("");
+  const [path, setPath] = useState("");
+  const [savedContent, setSavedContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.jin
+      .getGlobalAgentsMd()
+      .then((result) => {
+        if (cancelled) return;
+        setContent(result.content);
+        setSavedContent(result.content);
+        setPath(result.path);
+      })
+      .catch(() => {
+        if (!cancelled) setSaveError("load failed");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const dirty = content !== savedContent;
+  const save = async (): Promise<void> => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = await window.jin.saveGlobalAgentsMd(content);
+      setSavedContent(content);
+      setPath(result.path);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const projectRoot = app?.project?.root;
+  return (
+    <section>
+      <SectionLabel>{t("settings.rules")}</SectionLabel>
+      <p className="mt-1 text-[9.5px] leading-relaxed text-[var(--faint)]">
+        {t("settings.rulesHint")}
+      </p>
+      <textarea
+        className="field mt-3 h-36 resize-y font-mono-ui text-[10px]"
+        value={content}
+        onChange={(event) => setContent(event.target.value)}
+        placeholder={
+          "# Global rules\n\n- Always answer in the user's language.\n- Prefer small, focused modules."
+        }
+        spellCheck={false}
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          className="btn btn-primary h-7 text-[9px]"
+          disabled={!dirty || saving}
+          onClick={() => void save()}
+        >
+          {saving ? <Spinner size={9} /> : <Check size={10} />}
+          {dirty ? t("settings.rulesSave") : t("settings.rulesSaved")}
+        </button>
+        <code className="min-w-0 flex-1 truncate font-mono-ui text-[9px] text-[var(--faint)]">
+          {path || "…"}
+        </code>
+      </div>
+      {saveError ? <div className="mt-1 text-[9px] text-[var(--danger)]">{saveError}</div> : null}
+      <div className="hint mt-2 flex items-start gap-1.5">
+        <FileText size={9} className="mt-0.5 shrink-0" />
+        <span className="min-w-0 break-all">
+          {projectRoot
+            ? t("settings.rulesProjectPath", { path: `${projectRoot}/AGENTS.md` })
+            : t("settings.rulesProjectHint")}
+        </span>
+      </div>
+    </section>
+  );
 }
 
 function GeneralTab({
@@ -410,6 +495,8 @@ function GeneralTab({
           </div>
         ) : null}
       </section>
+
+      <RulesSection />
     </div>
   );
 }
@@ -518,6 +605,9 @@ function ProviderTab({
             >
               <option value="none">{t("settings.kind.none")}</option>
               <option value="openai-compatible">{t("settings.kind.openai")}</option>
+              <option value="openai-responses">{t("settings.kind.responses")}</option>
+              <option value="anthropic">{t("settings.kind.anthropic")}</option>
+              <option value="gemini">{t("settings.kind.gemini")}</option>
               <option value="ollama">{t("settings.kind.ollama")}</option>
             </select>
           </div>
@@ -557,10 +647,30 @@ function ProviderTab({
             className="field font-mono-ui"
             value={draft.baseUrl}
             onChange={(event) => setDraft({ baseUrl: event.target.value })}
-            placeholder="https://api.openai.com/v1"
+            placeholder={
+              draft.providerKind === "anthropic"
+                ? "https://api.anthropic.com"
+                : draft.providerKind === "gemini"
+                  ? "https://generativelanguage.googleapis.com"
+                  : draft.providerKind === "ollama"
+                    ? "http://localhost:11434/v1"
+                    : "https://api.openai.com/v1"
+            }
             disabled={draft.providerKind === "none"}
           />
-          <div className="hint mt-1">{t("settings.baseUrlHint")}</div>
+          <div className="hint mt-1">
+            {t(
+              draft.providerKind === "anthropic"
+                ? "settings.baseUrlHint.anthropic"
+                : draft.providerKind === "openai-responses"
+                  ? "settings.baseUrlHint.responses"
+                  : draft.providerKind === "gemini"
+                    ? "settings.baseUrlHint.gemini"
+                    : draft.providerKind === "ollama"
+                      ? "settings.baseUrlHint.ollama"
+                      : "settings.baseUrlHint",
+            )}
+          </div>
         </div>
 
         <div className="mt-3 grid gap-3 sm:grid-cols-2">

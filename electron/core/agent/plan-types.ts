@@ -121,6 +121,10 @@ export interface PlannerContext {
   onUsage?: (usage: import("./provider").ProviderTokenUsage) => void;
   /** Raw JSON deltas from the planner stream. */
   onDelta?: (delta: string) => void;
+  /** Model thinking/reasoning deltas from the planner stream. */
+  onReasoning?: (delta: string) => void;
+  /** AGENTS.md rules (project + global), injected into the planning prompt. */
+  rules?: string;
   signal?: AbortSignal;
 }
 

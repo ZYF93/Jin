@@ -1,11 +1,4 @@
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
@@ -17,7 +10,9 @@ import {
   ekoLlmConfig,
   MAX_STAGED_BYTES,
   normalizeProjectPath,
+  runEkoCoder,
   StagedWorkspace,
+  type EkoModule,
 } from "./eko-runtime";
 
 const roots: string[] = [];
@@ -220,5 +215,93 @@ describe("ekoLlmConfig", () => {
       searchCode: () => [],
     });
     expect(config.apiKey).toBe("jin-local");
+  });
+});
+
+describe("runEkoCoder callbacks", () => {
+  it("forwards thinking, tool calls, results and errors to the activity feed", async () => {
+    const root = fixture();
+    let onMessage: ((message: Record<string, unknown>) => Promise<void>) | null = null;
+    const fakeModule = {
+      config: {},
+      Agent: class {},
+      buildSimpleAgentWorkflow: (input: { taskId: string }) => ({ taskId: input.taskId }),
+      Eko: class {
+        constructor(options: {
+          callback: { onMessage: (m: Record<string, unknown>) => Promise<void> };
+        }) {
+          onMessage = options.callback.onMessage;
+        }
+        async initContext(): Promise<void> {}
+        async execute(): Promise<{
+          success: boolean;
+          stopReason: string;
+          result: string;
+        }> {
+          const emit = onMessage as ((m: Record<string, unknown>) => Promise<void>) | null;
+          await emit?.({ type: "thinking", text: "thinking hard", streamDone: true });
+          await emit?.({
+            type: "tool_use",
+            toolName: "read_file",
+            params: { path: "src/counter.ts" },
+          });
+          await emit?.({
+            type: "tool_result",
+            toolName: "read_file",
+            toolResult: { content: [{ type: "text", text: "file body" }] },
+          });
+          await emit?.({ type: "error", error: new Error("boom") });
+          await emit?.({ type: "finish", usage: { promptTokens: 10, completionTokens: 5 } });
+          await emit?.({ type: "text", text: "done summary", streamDone: true });
+          return { success: true, stopReason: "complete", result: "done summary" };
+        }
+        abortTask(): void {}
+        deleteTask(): void {}
+      },
+    };
+    const events: string[] = [];
+    const result = await runEkoCoder(
+      {
+        root,
+        provider: {
+          kind: "openai-compatible",
+          baseUrl: "http://127.0.0.1:8787/v1",
+          model: "mock-model",
+          apiKey: null,
+        },
+        system: "",
+        task: "t",
+        temperature: 0,
+        maxTokens: 100,
+        signal: new AbortController().signal,
+        snapshot: emptySnapshot(),
+        intent: {
+          id: "intent",
+          versionId: "version",
+          title: "Add reset",
+          goal: "Let the counter reset.",
+          tasks: [],
+          nodeIntents: [],
+          author: { id: "actor", kind: "user", name: "Tester", email: "" },
+          createdAt: new Date().toISOString(),
+        },
+        ops: [],
+        reusePlan: null,
+        searchCode: () => [],
+        onText: (text) => events.push(`text:${text}`),
+        onThinking: (text) => events.push(`thinking:${text}`),
+        onActivity: (entry) =>
+          events.push(`activity:${entry.tool}:${entry.detail}:${entry.isError ? "err" : "ok"}`),
+        onUsage: (usage) => events.push(`usage:${usage.promptTokens}/${usage.completionTokens}`),
+      },
+      { load: async () => fakeModule as unknown as EkoModule },
+    );
+    expect(result.summary).toBe("done summary");
+    expect(events).toContain("thinking:thinking hard");
+    expect(events).toContain("text:done summary");
+    expect(events).toContain("activity:read_file:src/counter.ts:ok");
+    expect(events).toContain("activity:read_file:file body:ok");
+    expect(events).toContain("activity:error:boom:err");
+    expect(events).toContain("usage:10/5");
   });
 });

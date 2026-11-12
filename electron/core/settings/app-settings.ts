@@ -44,6 +44,9 @@ const GLASS: ReadonlySet<GlassStrength> = new Set(["off", "subtle", "medium", "s
 const PROVIDER_KINDS: ReadonlySet<ProviderSettings["kind"]> = new Set([
   "none",
   "openai-compatible",
+  "openai-responses",
+  "anthropic",
+  "gemini",
   "ollama",
 ]);
 const REASONING_EFFORTS: ReadonlySet<ReasoningEffort> = new Set(["auto", "low", "medium", "high"]);

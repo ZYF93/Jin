@@ -256,6 +256,35 @@ export function parseOpenAIModelPayload(payload: unknown): ProviderModel[] {
   return dedupe(models);
 }
 
+/** Parse Google Generative Language `/v1beta/models` responses. */
+export function parseGeminiModelPayload(payload: unknown): ProviderModel[] {
+  const list =
+    isRecord(payload) && Array.isArray(payload.models)
+      ? payload.models
+      : Array.isArray(payload)
+        ? payload
+        : [];
+  const models = list
+    .map((item): ProviderModel | null => {
+      if (!isRecord(item)) return null;
+      const rawName = stringValue(item.name);
+      if (!rawName) return null;
+      // "models/gemini-2.5-pro" → "gemini-2.5-pro"; the API path prefix is
+      // added back by the endpoint builder.
+      const id = rawName.replace(/^models\//, "");
+      if (!id) return null;
+      const resolution = resolveReasoningEfforts(id);
+      return {
+        id,
+        name: stringValue(item.displayName) || id,
+        reasoningEfforts: resolution.efforts,
+        reasoningSource: resolution.source,
+      };
+    })
+    .filter((model): model is ProviderModel => model !== null);
+  return dedupe(models);
+}
+
 /** Parse Ollama `/api/tags` responses. */
 export function parseOllamaModelPayload(payload: unknown): ProviderModel[] {
   const list =
@@ -309,6 +338,10 @@ export function modelEndpointCandidates(
     const root = base.replace(/\/(api|v1)$/i, "");
     return [`${root}/api/tags`];
   }
+  if (kind === "gemini") {
+    const root = base.replace(/\/v1beta$/i, "").replace(/\/v1$/i, "");
+    return [`${root}/v1beta/models`];
+  }
   const apiRoot = base.replace(/\/chat\/completions$/i, "");
   if (/\/models$/i.test(apiRoot)) return [apiRoot];
   if (/\/v\d+$/i.test(apiRoot)) return [`${apiRoot}/models`];
@@ -339,12 +372,22 @@ async function readJson(response: Response): Promise<unknown> {
 async function requestCatalog(
   url: string,
   apiKey: string | null,
+  kind: ProviderModelRequest["kind"] = "openai-compatible",
 ): Promise<{ payload: unknown; status: number }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
     const headers: Record<string, string> = { accept: "application/json" };
-    if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+    if (apiKey) {
+      if (kind === "anthropic") {
+        headers["x-api-key"] = apiKey;
+        headers["anthropic-version"] = "2023-06-01";
+      } else if (kind === "gemini") {
+        headers["x-goog-api-key"] = apiKey;
+      } else {
+        headers.authorization = `Bearer ${apiKey}`;
+      }
+    }
     const response = await fetch(url, { headers, signal: controller.signal });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -459,7 +502,7 @@ export async function fetchModelCatalog(
   let payload: unknown = null;
   let lastStatus = 0;
   for (const url of candidates) {
-    const result = await requestCatalog(url, request.apiKey ?? null);
+    const result = await requestCatalog(url, request.apiKey ?? null, request.kind);
     lastStatus = result.status;
     if (result.status !== 404) {
       payload = result.payload;
@@ -474,7 +517,11 @@ export async function fetchModelCatalog(
     );
   }
   let models =
-    request.kind === "ollama" ? parseOllamaModelPayload(payload) : parseOpenAIModelPayload(payload);
+    request.kind === "ollama"
+      ? parseOllamaModelPayload(payload)
+      : request.kind === "gemini"
+        ? parseGeminiModelPayload(payload)
+        : parseOpenAIModelPayload(payload);
   if (request.kind === "ollama") {
     models = await enrichOllamaModels(request.baseUrl, models, request.apiKey ?? null);
   }

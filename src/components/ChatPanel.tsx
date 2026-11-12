@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowRight,
   Bot,
+  Brain,
   CheckCircle2,
   GitPullRequest,
   MessageSquare,
@@ -11,6 +12,7 @@ import {
   Sparkles,
   Square,
   User,
+  Wrench,
   XCircle,
 } from "lucide-react";
 import type { ChatMessage } from "../../shared/ipc";
@@ -131,12 +133,13 @@ function StreamBubble() {
   const t = useT();
   const stream = useJin((state) => state.stream);
   if (!stream) return null;
+  const activity = stream.activity.slice(-30);
   return (
     <div className="fade-in flex gap-2">
       <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--accent-soft)]">
         <Bot size={12} className="text-[var(--accent)]" />
       </div>
-      <div className="min-w-0 max-w-[calc(100%-28px)]">
+      <div className="min-w-0 max-w-[calc(100%-28px)] flex-1">
         <div className="rounded-xl border border-[var(--accent)]/25 bg-[var(--panel-soft)] px-2.5 py-2">
           <div className="flex items-center gap-1.5 text-[8px] font-semibold uppercase tracking-wide text-[var(--faint)]">
             {stream.phase === "thinking" ? (
@@ -146,6 +149,43 @@ function StreamBubble() {
             )}
             <span className="truncate">{stream.label}</span>
           </div>
+          {activity.length > 0 ? (
+            <div className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--panel)]/70 p-1.5">
+              {activity.map((entry) => (
+                <div
+                  key={entry.id}
+                  className="flex min-w-0 items-start gap-1.5 text-[9px] leading-snug"
+                >
+                  {entry.isError ? (
+                    <AlertTriangle size={9} className="mt-0.5 shrink-0 text-[var(--danger)]" />
+                  ) : (
+                    <Wrench size={9} className="mt-0.5 shrink-0 text-[var(--accent)]" />
+                  )}
+                  <span
+                    className={`shrink-0 font-semibold ${
+                      entry.isError ? "text-[var(--danger)]" : "text-[var(--text)]"
+                    }`}
+                  >
+                    {entry.tool}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono-ui text-[var(--faint)]">
+                    {entry.detail}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {stream.reasoning ? (
+            <details className="message-details mt-1.5" open={stream.phase === "thinking"}>
+              <summary className="flex items-center gap-1.5 text-[9px] font-semibold text-[var(--faint)]">
+                <Brain size={9} />
+                {t("chat.thinking")}
+              </summary>
+              <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[9.5px] italic leading-relaxed text-[var(--faint)]">
+                {stream.reasoning}
+              </pre>
+            </details>
+          ) : null}
           <div className="mt-1 break-words text-[10.5px] leading-relaxed text-[var(--muted)]">
             <MarkdownContent content={stream.content || t("chat.streamWaiting")} />
             <span className="stream-caret" aria-hidden="true" />
@@ -223,10 +263,7 @@ function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
           ) : null}
         </div>
         {working ? (
-          <ol
-            className="mt-2 grid grid-cols-4 gap-1"
-            aria-label={t("approvalFlow.title")}
-          >
+          <ol className="mt-2 grid grid-cols-4 gap-1" aria-label={t("approvalFlow.title")}>
             {flow.map((step) => (
               <li
                 key={step.key}
@@ -293,7 +330,15 @@ export function ChatPanel() {
       if (container) container.scrollTop = container.scrollHeight;
     }, 30);
     return () => window.clearTimeout(timer);
-  }, [messages.length, agent?.phase, agent?.message, stream?.content.length, stream?.label]);
+  }, [
+    messages.length,
+    agent?.phase,
+    agent?.message,
+    stream?.content.length,
+    stream?.reasoning.length,
+    stream?.activity.length,
+    stream?.label,
+  ]);
 
   const submit = (request: string): void => {
     if (!request || disabled) return;

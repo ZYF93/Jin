@@ -7,6 +7,7 @@ import type {
 } from "../../../shared/ledger/types";
 import type { ProviderConfig } from "./provider";
 import { completeJson, ProviderError } from "./provider";
+import { clipPreview } from "../log/llm-log";
 import type {
   PlannedNodeAdd,
   PlannedOp,
@@ -312,6 +313,39 @@ JSON shape for a plan turn:
   ]
 }`;
 
+/** Title field with common aliases some models use despite the schema. */
+function planTitle(value: Record<string, unknown>): string {
+  return (
+    stringValue(value.title).trim() ||
+    stringValue(value.name).trim() ||
+    stringValue(value.subject).trim()
+  );
+}
+
+/** Goal field with common aliases some models use despite the schema. */
+function planGoal(value: Record<string, unknown>): string {
+  return (
+    stringValue(value.goal).trim() ||
+    stringValue(value.description).trim() ||
+    stringValue(value.objective).trim()
+  );
+}
+
+/**
+ * Some models wrap the plan in a single container object despite the schema
+ * (e.g. {"plan": {...}}). Unwrap when the top level lacks title/goal.
+ */
+function unwrapPlanObject(value: Record<string, unknown>): Record<string, unknown> {
+  if (stringValue(value.kind) === "chat") return value;
+  if (planTitle(value) && planGoal(value)) return value;
+  const nested = Object.values(value).filter(
+    (entry): entry is Record<string, unknown> =>
+      typeof entry === "object" && entry !== null && !Array.isArray(entry),
+  );
+  const innerPlan = nested.find((entry) => planTitle(entry) && planGoal(entry));
+  return innerPlan ?? value;
+}
+
 export async function planWithProvider(
   config: ProviderConfig,
   request: string,
@@ -335,12 +369,13 @@ export async function planWithProvider(
       ? `Initial reuse retrieval (informational; verify in code):\n${context.reuseSummary}`
       : "",
     context.skills ? `Relevant skills:\n${context.skills}` : "",
+    context.rules ? `Rules from AGENTS.md (must be respected):\n${context.rules}` : "",
     "Return the JSON object described in the system prompt.",
   ]
     .filter(Boolean)
     .join("\n\n");
 
-  const json = await completeJson(config, SYSTEM_PROMPT, user, {
+  const options = {
     temperature: 0.2,
     maxTokens: 8000,
     json: true,
@@ -348,15 +383,32 @@ export async function planWithProvider(
     signal: context.signal,
     onUsage: context.onUsage,
     onDelta: context.onDelta,
-  });
+    onReasoning: context.onReasoning,
+  };
+  let json = unwrapPlanObject(await completeJson(config, SYSTEM_PROMPT, user, options));
+  if (stringValue(json.kind) !== "chat" && !(planTitle(json) && planGoal(json))) {
+    // One schema repair attempt: some models answer with commentary or a
+    // partial object. A retry with the exact gap named usually fixes it.
+    json = unwrapPlanObject(
+      await completeJson(
+        config,
+        SYSTEM_PROMPT,
+        `${user}\n\nYour previous response did not follow the required schema: it lacked non-empty "title" and "goal" strings. Return the SAME answer as exactly one valid JSON object with non-empty "title" and "goal" fields, exactly matching the schema in the system prompt. Do not add any text before or after the object.`,
+        { ...options, onDelta: undefined },
+      ),
+    );
+  }
 
-  if (json.kind === "chat") {
+  if (stringValue(json.kind) === "chat") {
     const message =
       stringValue(json.message).trim() ||
       stringValue(json.answer).trim() ||
       stringValue(json.reply).trim();
     if (!message) {
-      throw new ProviderError("Chat response is missing a message");
+      throw new ProviderError(
+        "Chat response is missing a message",
+        `Model response JSON:\n${clipPreview(JSON.stringify(json, null, 2), 4_000)}`,
+      );
     }
     return {
       kind: "chat",
@@ -370,10 +422,16 @@ export async function planWithProvider(
     };
   }
 
-  const title = stringValue(json.title).trim();
-  const goal = stringValue(json.goal).trim();
+  const title = planTitle(json);
+  const goal = planGoal(json);
   if (!title || !goal) {
-    throw new ProviderError("Architect response is missing title or goal");
+    throw new ProviderError(
+      "Architect response is missing title or goal",
+      `The model returned valid JSON without non-empty "title" and "goal" fields (after one automatic repair attempt). Model response JSON:\n${clipPreview(
+        JSON.stringify(json, null, 2),
+        4_000,
+      )}`,
+    );
   }
   const ops = parseOps(json.ops);
   const nodeIntents = parseNodeIntents(json.nodeIntents);

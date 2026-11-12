@@ -269,6 +269,7 @@ const en = {
   "chat.keepTurn": "The architecture, code, and verification stay in one turn.",
   "chat.reviewDiff": "Review architecture diff",
   "chat.details": "Implementation & verification details",
+  "chat.thinking": "Thinking",
   "chat.historical": "historical",
   "chat.cancelAgent": "Cancel agent",
   "chat.streamPlanning": "Planning the turn…",
@@ -442,11 +443,22 @@ const en = {
     "Models are fetched from the provider's compatible model endpoint. You can still type an id manually.",
   "settings.modelsFound": "{count} remote models available. Pick one from the list.",
   "settings.providerDetail":
-    "Jin speaks the OpenAI chat-completions API. Ollama uses the same protocol at a local endpoint. A provider is required for AI planning and implementation.",
+    "Jin speaks OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages APIs. Ollama uses the OpenAI-compatible protocol at a local endpoint. A provider is required for AI planning and implementation.",
   "settings.kind": "Kind",
   "settings.kind.none": "None (AI unavailable)",
   "settings.kind.openai": "OpenAI-compatible",
+  "settings.kind.responses": "OpenAI Responses",
+  "settings.kind.anthropic": "Anthropic (Claude)",
+  "settings.kind.gemini": "Google Gemini",
   "settings.kind.ollama": "Ollama / local",
+  "settings.baseUrlHint.responses":
+    "OpenAI Responses API. Base URL like https://api.openai.com/v1; Jin appends /responses.",
+  "settings.baseUrlHint.anthropic":
+    "Anthropic Messages API. Base URL like https://api.anthropic.com; Jin appends /v1/messages and uses x-api-key auth.",
+  "settings.baseUrlHint.gemini":
+    "Google Generative Language API. Base URL like https://generativelanguage.googleapis.com; Jin appends /v1beta/models/<model>:generateContent and uses x-goog-api-key auth.",
+  "settings.baseUrlHint.ollama":
+    "Ollama uses the OpenAI-compatible protocol at a local endpoint; Jin appends /chat/completions.",
   "settings.model": "Model",
   "settings.baseUrl": "Base URL",
   "settings.baseUrlHint":
@@ -471,6 +483,14 @@ const en = {
   "settings.agent": "Agent",
   "settings.toolsRequired":
     "The implementation agent needs tool calls (function calling). If your model rejects tools, implementation fails with a clear error — switch to a tool-capable model.",
+  "settings.rules": "Agent rules · AGENTS.md",
+  "settings.rulesHint":
+    "Global instructions injected into every planning and implementation prompt, for every project. Project-level rules live in an AGENTS.md file at the project root and are merged on top.",
+  "settings.rulesSave": "Save rules",
+  "settings.rulesSaved": "Saved",
+  "settings.rulesProjectHint":
+    "Open a project to see where its AGENTS.md lives — create it there to add project-specific rules.",
+  "settings.rulesProjectPath": "Project rules file: {path}",
   "settings.semanticScan": "Refine scans with the model",
   "settings.semanticScanDetail":
     "The first project scan uses the configured provider to describe file and directory responsibilities. This option also refines later scans; structural facts stay authoritative, and symbol claims are checked against LSP data.",
@@ -1325,6 +1345,7 @@ const zh: Record<MessageKey, string> = {
   "chat.keepTurn": "架构、代码与验证始终在同一轮中完成。",
   "chat.reviewDiff": "审阅架构差异",
   "chat.details": "实现与验证详情",
+  "chat.thinking": "思考过程",
   "chat.historical": "历史",
   "chat.cancelAgent": "取消 Agent",
   "chat.streamPlanning": "正在规划本轮…",
@@ -1485,15 +1506,26 @@ const zh: Record<MessageKey, string> = {
   "settings.modelsHint": "模型会从 Provider 的兼容模型端点自动拉取；也可以手动输入模型 ID。",
   "settings.modelsFound": "已获取 {count} 个远端模型，可从列表中选择。",
   "settings.providerDetail":
-    "Jin 使用 OpenAI Chat Completions API。Ollama 在本地端点使用同一协议。AI 规划和实现需要配置 Provider。",
+    "Jin 支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、Google Gemini 四种 API 协议。Ollama 在本地端点使用 OpenAI 兼容协议。AI 规划和实现需要配置 Provider。",
   "settings.kind": "类型",
   "settings.kind.none": "无（AI 不可用）",
   "settings.kind.openai": "OpenAI 兼容",
+  "settings.kind.responses": "OpenAI Responses",
+  "settings.kind.anthropic": "Anthropic（Claude）",
+  "settings.kind.gemini": "Google Gemini",
   "settings.kind.ollama": "Ollama / 本地",
   "settings.model": "模型",
   "settings.baseUrl": "Base URL",
   "settings.baseUrlHint":
     "Ollama 通常运行在 http://localhost:11434/v1。Jin 会追加 /chat/completions。",
+  "settings.baseUrlHint.responses":
+    "OpenAI Responses API。Base URL 形如 https://api.openai.com/v1；Jin 会追加 /responses。",
+  "settings.baseUrlHint.anthropic":
+    "Anthropic Messages API。Base URL 形如 https://api.anthropic.com；Jin 会追加 /v1/messages，并使用 x-api-key 认证。",
+  "settings.baseUrlHint.gemini":
+    "Google Generative Language API。Base URL 形如 https://generativelanguage.googleapis.com；Jin 会追加 /v1beta/models/<模型>:generateContent，并使用 x-goog-api-key 认证。",
+  "settings.baseUrlHint.ollama":
+    "Ollama 在本地端点使用 OpenAI 兼容协议；Jin 会追加 /chat/completions。",
   "settings.inputPrice": "输入价格 · 美元 / 百万 Token",
   "settings.outputPrice": "输出价格 · 美元 / 百万 Token",
   "settings.priceHint": "可选。价格只用于本地 Token/成本面板，不会离开本机。",
@@ -1512,6 +1544,14 @@ const zh: Record<MessageKey, string> = {
   "settings.agent": "Agent",
   "settings.toolsRequired":
     "实现代理依赖工具调用（Function Calling）：请选择支持 tools 的模型，否则实现会失败并给出明确提示。",
+  "settings.rules": "Agent 规则 · AGENTS.md",
+  "settings.rulesHint":
+    "注入到每次规划与实现提示词中的全局指令，对所有项目生效。项目级规则放在项目根目录的 AGENTS.md 文件里，会叠加在全局规则之上。",
+  "settings.rulesSave": "保存规则",
+  "settings.rulesSaved": "已保存",
+  "settings.rulesProjectHint":
+    "打开项目后可看到其 AGENTS.md 路径——在该路径创建文件即可添加项目专属规则。",
+  "settings.rulesProjectPath": "项目规则文件：{path}",
   "settings.semanticScan": "用模型细化扫描",
   "settings.semanticScanDetail":
     "首次扫描会使用已配置的 Provider 描述文件与目录职责。开启此项后后续扫描也会细化；结构事实保持权威，符号声明会与 LSP 数据核对。",

@@ -20,6 +20,8 @@ export interface CompletionOptions {
   phase?: string;
   /** Best-effort token telemetry from the provider response. */
   onUsage?: (usage: ProviderTokenUsage) => void;
+  /** Reasoning ("thinking") deltas for providers that stream them separately. */
+  onReasoning?: (delta: string) => void;
   /**
    * When set, the request uses SSE streaming and receives text deltas as they
    * arrive. The resolved string is still the complete response.
@@ -36,14 +38,24 @@ export function extractUsage(value: unknown): ProviderTokenUsage | null {
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
   const usage =
-    typeof record.usage === "object" && record.usage !== null
-      ? (record.usage as Record<string, unknown>)
-      : record;
+    typeof record.usageMetadata === "object" && record.usageMetadata !== null
+      ? (record.usageMetadata as Record<string, unknown>)
+      : typeof record.usage === "object" && record.usage !== null
+        ? (record.usage as Record<string, unknown>)
+        : record;
   const promptTokens = count(
-    usage.prompt_tokens ?? usage.promptTokens ?? usage.input_tokens ?? usage.prompt_eval_count,
+    usage.prompt_tokens ??
+      usage.promptTokens ??
+      usage.promptTokenCount ??
+      usage.input_tokens ??
+      usage.prompt_eval_count,
   );
   const completionTokens = count(
-    usage.completion_tokens ?? usage.completionTokens ?? usage.output_tokens ?? usage.eval_count,
+    usage.completion_tokens ??
+      usage.completionTokens ??
+      usage.candidatesTokenCount ??
+      usage.output_tokens ??
+      usage.eval_count,
   );
   if (promptTokens === 0 && completionTokens === 0) return null;
   return { promptTokens, completionTokens };
@@ -393,8 +405,392 @@ export function consumeToolsUnsupportedHint(): boolean {
 const TOOLS_UNSUPPORTED_MESSAGE =
   "The provider rejected tool calls (function calling). The implementation agent requires a tool-capable model.";
 
-function endpoint(baseUrl: string): string {
-  return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+/** Wire protocol used to talk to the provider endpoint. */
+export type Protocol = "chat" | "responses" | "anthropic" | "gemini";
+
+export function protocolOf(kind: ProviderSettings["kind"]): Protocol {
+  if (kind === "openai-responses") return "responses";
+  if (kind === "anthropic") return "anthropic";
+  if (kind === "gemini") return "gemini";
+  return "chat";
+}
+
+function protocolEndpoint(protocol: Protocol, config: ProviderConfig, streaming: boolean): string {
+  const base = config.baseUrl.replace(/\/+$/, "");
+  if (protocol === "anthropic") {
+    // Accept both https://api.anthropic.com and https://api.anthropic.com/v1.
+    return `${base.replace(/\/v1$/, "")}/v1/messages`;
+  }
+  if (protocol === "responses") {
+    return `${base}/responses`;
+  }
+  if (protocol === "gemini") {
+    // Accept both https://generativelanguage.googleapis.com and .../v1beta.
+    const apiRoot = base.replace(/\/v1beta$/, "").replace(/\/v1$/, "");
+    const model = encodeURIComponent(config.model);
+    return streaming
+      ? `${apiRoot}/v1beta/models/${model}:streamGenerateContent?alt=sse`
+      : `${apiRoot}/v1beta/models/${model}:generateContent`;
+  }
+  return `${base}/chat/completions`;
+}
+
+function protocolHeaders(protocol: Protocol, apiKey: string | null): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (!apiKey) return headers;
+  if (protocol === "anthropic") {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else if (protocol === "gemini") {
+    headers["x-goog-api-key"] = apiKey;
+  } else {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
+  return headers;
+}
+
+/** Reasoning budget for Anthropic extended thinking, per effort level. */
+const ANTHROPIC_THINKING_BUDGET: Record<string, number> = {
+  low: 2_048,
+  medium: 8_192,
+  high: 16_384,
+};
+
+const ANTHROPIC_JSON_INSTRUCTION =
+  "Respond with exactly one valid JSON object and no text before or after it.";
+
+function protocolBody(
+  protocol: Protocol,
+  config: ProviderConfig,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  options: CompletionOptions,
+  json: boolean,
+  streaming: boolean,
+): Record<string, unknown> {
+  const effort =
+    config.reasoningEffort && config.reasoningEffort !== "auto"
+      ? config.reasoningEffort
+      : undefined;
+  const temperature = options.temperature ?? 0.2;
+  const system = messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n");
+  const turns = messages.filter((message) => message.role !== "system");
+
+  if (protocol === "anthropic") {
+    const budget = effort ? ANTHROPIC_THINKING_BUDGET[effort] : undefined;
+    const maxTokens = options.maxTokens ?? 8000;
+    // Anthropic requires max_tokens > budget_tokens while thinking is enabled.
+    const body: Record<string, unknown> = {
+      model: config.model,
+      max_tokens: budget ? Math.max(maxTokens, budget + 1_024) : maxTokens,
+      messages: turns.map((message) => ({ role: message.role, content: message.content })),
+    };
+    let systemText = system;
+    if (json) {
+      systemText = `${systemText ? `${systemText}\n\n` : ""}${ANTHROPIC_JSON_INSTRUCTION}`;
+    }
+    if (systemText) body.system = systemText;
+    body.stream = streaming;
+    // Extended thinking requires temperature to be unset (defaults to 1).
+    if (!budget) body.temperature = temperature;
+    if (budget) body.thinking = { type: "enabled", budget_tokens: budget };
+    return body;
+  }
+
+  if (protocol === "gemini") {
+    const generationConfig: Record<string, unknown> = {
+      temperature,
+      maxOutputTokens: options.maxTokens ?? 8000,
+    };
+    if (json) generationConfig.responseMimeType = "application/json";
+    if (effort) {
+      // Gemini 2.5 thinking budget (Flash caps at 24576, Pro at 32768).
+      generationConfig.thinkingConfig = {
+        thinkingBudget:
+          ({ low: 1_024, medium: 8_192, high: 24_576 } as Record<string, number>)[effort] ?? 8_192,
+      };
+    }
+    const body: Record<string, unknown> = {
+      contents: turns.map((message) => ({
+        role: message.role === "assistant" ? "model" : "user",
+        parts: [{ text: message.content }],
+      })),
+      generationConfig,
+    };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
+    return body;
+  }
+
+  if (protocol === "responses") {
+    const body: Record<string, unknown> = {
+      model: config.model,
+      instructions: system,
+      input: turns.map((message) => ({ role: message.role, content: message.content })),
+      max_output_tokens: options.maxTokens ?? 8000,
+      stream: streaming,
+      temperature,
+    };
+    if (json) body.text = { format: { type: "json_object" } };
+    if (effort) body.reasoning = { effort };
+    return body;
+  }
+
+  const body: Record<string, unknown> = {
+    model: config.model,
+    messages,
+    temperature,
+    max_tokens: options.maxTokens ?? 8000,
+    stream: streaming,
+  };
+  if (streaming) body.stream_options = { include_usage: true };
+  if (json) body.response_format = { type: "json_object" };
+  if (effort) body.reasoning_effort = effort;
+  return body;
+}
+
+/** Optional fields that some endpoints reject with HTTP 400 and can be dropped. */
+function deleteBodyField(body: Record<string, unknown>, field: string): void {
+  const dot = field.indexOf(".");
+  if (dot < 0) {
+    delete body[field];
+    return;
+  }
+  const parent = body[field.slice(0, dot)];
+  if (typeof parent === "object" && parent !== null) {
+    delete (parent as Record<string, unknown>)[field.slice(dot + 1)];
+  }
+}
+
+function protocolOptionalFields(
+  protocol: Protocol,
+  body: Record<string, unknown>,
+  json: boolean,
+  streaming: boolean,
+): string[] {
+  if (protocol === "gemini") {
+    const generation = (body.generationConfig ?? {}) as Record<string, unknown>;
+    return [
+      ...(json && generation.responseMimeType ? ["generationConfig.responseMimeType"] : []),
+      ...(generation.thinkingConfig ? ["generationConfig.thinkingConfig"] : []),
+      ...(generation.temperature !== undefined ? ["generationConfig.temperature"] : []),
+    ];
+  }
+  if (protocol === "responses") {
+    return [
+      ...(json && body.text ? ["text"] : []),
+      ...(body.reasoning ? ["reasoning"] : []),
+      ...(body.temperature !== undefined ? ["temperature"] : []),
+    ];
+  }
+  if (protocol === "anthropic") {
+    return body.thinking ? ["thinking"] : [];
+  }
+  return [
+    ...(json && body.response_format ? ["response_format"] : []),
+    ...(body.reasoning_effort ? ["reasoning_effort"] : []),
+    ...(streaming && body.stream_options ? ["stream_options"] : []),
+  ];
+}
+
+/** Parse one non-streaming protocol response into text, usage and reasoning. */
+function parseResponseValue(
+  protocol: Protocol,
+  value: unknown,
+  rawBody?: string,
+): { text: string; usage: ProviderTokenUsage | null } {
+  if (protocol === "anthropic") {
+    const content = (value as { content?: unknown })?.content;
+    const text = Array.isArray(content)
+      ? content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            (block as { type?: unknown }).type === "text" &&
+            typeof (block as { text?: unknown }).text === "string"
+              ? (block as { text: string }).text
+              : "",
+          )
+          .join("")
+      : "";
+    const usage = extractUsage(value);
+    if (!text) {
+      throw new ProviderError("Anthropic response has no text content", rawBodyDetail(rawBody));
+    }
+    return { text, usage };
+  }
+  if (protocol === "responses") {
+    const record = (value ?? {}) as {
+      output_text?: unknown;
+      output?: unknown;
+    };
+    let text = typeof record.output_text === "string" ? record.output_text : "";
+    if (!text && Array.isArray(record.output)) {
+      text = record.output
+        .map((item) =>
+          typeof item === "object" &&
+          item !== null &&
+          (item as { type?: unknown }).type === "message"
+            ? ((item as { content?: unknown }).content ?? [])
+            : [],
+        )
+        .flat()
+        .map((part) =>
+          typeof part === "object" &&
+          part !== null &&
+          (part as { type?: unknown }).type === "output_text" &&
+          typeof (part as { text?: unknown }).text === "string"
+            ? (part as { text: string }).text
+            : "",
+        )
+        .join("");
+    }
+    const usage = extractUsage(value);
+    if (!text) {
+      throw new ProviderError("Responses API returned no output text", rawBodyDetail(rawBody));
+    }
+    return { text, usage };
+  }
+  if (protocol === "gemini") {
+    const candidate = ((value as { candidates?: unknown })?.candidates as Array<unknown>)?.[0];
+    const parts = ((candidate as { content?: { parts?: unknown } })?.content?.parts ??
+      []) as Array<{ text?: unknown; thought?: unknown }>;
+    let text = "";
+    for (const part of parts) {
+      if (typeof part.text !== "string" || !part.text || part.thought === true) continue;
+      text += part.text;
+    }
+    const usage = extractUsage(value);
+    if (!text) {
+      throw new ProviderError("Gemini response has no text parts", rawBodyDetail(rawBody));
+    }
+    return { text, usage };
+  }
+  return { text: extractContent(value, rawBody), usage: extractUsage(value) };
+}
+
+/** One parsed protocol event: what a single SSE data line contributes. */
+interface SseEventInfo {
+  delta?: string;
+  reasoning?: { text: string; field: string };
+  usage?: ProviderTokenUsage | null;
+  finishReason?: string;
+  model?: string;
+  toolCall?: boolean;
+  done?: boolean;
+}
+
+const EMPTY_EVENT: SseEventInfo = {};
+
+function responsesUsage(value: unknown): ProviderTokenUsage | null {
+  const usage = (value as { response?: { usage?: unknown } })?.response?.usage;
+  if (!usage) return null;
+  return extractUsage(usage);
+}
+
+function parseSseEvent(protocol: Protocol, value: unknown): SseEventInfo {
+  if (protocol === "responses") {
+    const type = (value as { type?: unknown })?.type;
+    if (typeof type !== "string") return EMPTY_EVENT;
+    if (type === "response.output_text.delta") {
+      const delta = (value as { delta?: unknown }).delta;
+      return typeof delta === "string" && delta ? { delta } : EMPTY_EVENT;
+    }
+    if (type === "response.reasoning_summary_text.delta") {
+      const delta = (value as { delta?: unknown }).delta;
+      return typeof delta === "string" && delta
+        ? { reasoning: { text: delta, field: "reasoning_summary" } }
+        : EMPTY_EVENT;
+    }
+    if (type === "response.output_item.added") {
+      const item = (value as { item?: unknown }).item;
+      return (item as { type?: unknown })?.type === "function_call"
+        ? { toolCall: true }
+        : EMPTY_EVENT;
+    }
+    if (type === "response.completed" || type === "response.incomplete") {
+      const response = (value as { response?: Record<string, unknown> }).response ?? {};
+      return {
+        usage: responsesUsage(value),
+        finishReason: type === "response.completed" ? "completed" : "incomplete",
+        model: typeof response.model === "string" ? response.model : undefined,
+      };
+    }
+    if (type === "response.failed") {
+      return { finishReason: "failed" };
+    }
+    return EMPTY_EVENT;
+  }
+  if (protocol === "anthropic") {
+    const type = (value as { type?: unknown })?.type;
+    if (type === "message_start") {
+      const message = (value as { message?: Record<string, unknown> }).message ?? {};
+      return {
+        usage: extractUsage(message.usage),
+        model: typeof message.model === "string" ? message.model : undefined,
+      };
+    }
+    if (type === "content_block_start") {
+      const block = (value as { content_block?: unknown }).content_block;
+      return (block as { type?: unknown })?.type === "tool_use" ? { toolCall: true } : EMPTY_EVENT;
+    }
+    if (type === "content_block_delta") {
+      const delta = (value as { delta?: Record<string, unknown> }).delta ?? {};
+      if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text) {
+        return { delta: delta.text };
+      }
+      if (delta.type === "thinking_delta" && typeof delta.thinking === "string" && delta.thinking) {
+        return { reasoning: { text: delta.thinking, field: "thinking" } };
+      }
+      return EMPTY_EVENT;
+    }
+    if (type === "message_delta") {
+      const info = (value as { delta?: Record<string, unknown>; usage?: unknown }) ?? {};
+      return {
+        usage: extractUsage(info.usage),
+        finishReason:
+          typeof info.delta?.stop_reason === "string" ? info.delta.stop_reason : undefined,
+      };
+    }
+    if (type === "message_stop") return { done: true };
+    return EMPTY_EVENT;
+  }
+  if (protocol === "gemini") {
+    const candidate = ((value as { candidates?: unknown })?.candidates as Array<unknown>)?.[0];
+    const parts = ((candidate as { content?: { parts?: unknown } })?.content?.parts ??
+      []) as Array<{ text?: unknown; thought?: unknown }>;
+    let delta = "";
+    let reasoningText = "";
+    for (const part of parts) {
+      if (typeof part.text !== "string" || !part.text) continue;
+      if (part.thought === true) reasoningText += part.text;
+      else delta += part.text;
+    }
+    const finish = (candidate as { finishReason?: unknown })?.finishReason;
+    return {
+      ...(delta ? { delta } : {}),
+      ...(reasoningText ? { reasoning: { text: reasoningText, field: "thought" } } : {}),
+      ...(typeof finish === "string" && finish ? { finishReason: finish } : {}),
+      usage: extractUsage(value),
+      model:
+        typeof (value as { modelVersion?: unknown }).modelVersion === "string"
+          ? (value as { modelVersion: string }).modelVersion || undefined
+          : undefined,
+    };
+  }
+  const usage = extractUsage(value);
+  return {
+    ...(usage ? { usage } : {}),
+    delta: extractDelta(value),
+    reasoning: extractReasoningDelta(value),
+    finishReason: finishReasonOf(value) || undefined,
+    model:
+      typeof (value as { model?: unknown }).model === "string"
+        ? (value as { model: string }).model || undefined
+        : undefined,
+    toolCall: hasToolCallDelta(value),
+  };
 }
 
 function extractContent(value: unknown, rawBody?: string): string {
@@ -576,10 +972,24 @@ function emptyStreamDetails(
  * body instead. When `diagnostics` is given it is filled with chunk-level
  * counters for logging and error reporting.
  */
-export async function readStream(
+export /** Merge split usage events (e.g. Anthropic input in message_start, output in message_delta). */
+function mergeUsage(
+  previous: ProviderTokenUsage | null,
+  next: ProviderTokenUsage | null,
+): ProviderTokenUsage | null {
+  if (!next) return previous;
+  if (!previous) return next;
+  return {
+    promptTokens: next.promptTokens || previous.promptTokens,
+    completionTokens: next.completionTokens || previous.completionTokens,
+  };
+}
+
+async function readStream(
   response: Response,
   options: CompletionOptions,
   diagnostics?: StreamDiagnostics,
+  protocol: Protocol = "chat",
 ): Promise<string> {
   const stats = diagnostics?.stats ?? emptyStreamStats();
   const contentType = response.headers.get("content-type") ?? "";
@@ -594,9 +1004,9 @@ export async function readStream(
         `Raw response:\n${clipPreview(rawBody, 4_000)}`,
       );
     }
-    const usage = extractUsage(value);
-    if (usage) options.onUsage?.(usage);
-    const text = extractContent(value, rawBody);
+    const parsed = parseResponseValue(protocol, value, rawBody);
+    if (parsed.usage) options.onUsage?.(parsed.usage);
+    const text = parsed.text;
     if (!text) {
       const details = emptyStreamDetails(
         { stats, lastEvent: clipPreview(rawBody, 2_000) },
@@ -627,6 +1037,7 @@ export async function readStream(
   let buffer = "";
   let content = "";
   let done = false;
+  let mergedUsage: ProviderTokenUsage | null = null;
   try {
     while (!done) {
       const chunk = await reader.read();
@@ -653,22 +1064,22 @@ export async function readStream(
           }
           stats.events += 1;
           if (diagnostics) diagnostics.lastEvent = clipPreview(line, 2_000);
-          const usage = extractUsage(value);
-          if (usage) {
+          const info = parseSseEvent(protocol, value);
+          if (info.usage) {
             stats.usageSeen = true;
-            options.onUsage?.(usage);
+            mergedUsage = mergeUsage(mergedUsage, info.usage);
+            if (mergedUsage) options.onUsage?.(mergedUsage);
           }
-          const model = (value as { model?: unknown }).model;
-          if (typeof model === "string" && model) stats.model = model;
-          const finish = finishReasonOf(value);
-          if (finish) stats.finishReason = finish;
-          if (hasToolCallDelta(value)) stats.toolCallChunks += 1;
-          const reasoning = extractReasoningDelta(value);
-          if (reasoning.text) {
-            stats.reasoningChars += reasoning.text.length;
-            stats.reasoningField = stats.reasoningField || reasoning.field;
+          if (info.model) stats.model = info.model;
+          if (info.finishReason) stats.finishReason = info.finishReason;
+          if (info.toolCall) stats.toolCallChunks += 1;
+          if (info.reasoning?.text) {
+            stats.reasoningChars += info.reasoning.text.length;
+            stats.reasoningField = stats.reasoningField || info.reasoning.field;
+            options.onReasoning?.(info.reasoning.text);
           }
-          const delta = extractDelta(value);
+          if (info.done) done = true;
+          const delta = info.delta;
           if (!delta) continue;
           stats.deltas += 1;
           stats.contentChars += delta.length;
@@ -688,17 +1099,18 @@ export async function readStream(
           const value = JSON.parse(line) as unknown;
           stats.events += 1;
           if (diagnostics) diagnostics.lastEvent = clipPreview(line, 2_000);
-          const usage = extractUsage(value);
-          if (usage) {
+          const info = parseSseEvent(protocol, value);
+          if (info.usage) {
             stats.usageSeen = true;
-            options.onUsage?.(usage);
+            mergedUsage = mergeUsage(mergedUsage, info.usage);
+            if (mergedUsage) options.onUsage?.(mergedUsage);
           }
-          const delta = extractDelta(value);
-          if (delta) {
+          if (info.done) done = true;
+          if (info.delta) {
             stats.deltas += 1;
-            stats.contentChars += delta.length;
-            content += delta;
-            options.onDelta?.(delta);
+            stats.contentChars += info.delta.length;
+            content += info.delta;
+            options.onDelta?.(info.delta);
           }
         } catch {
           // A partial trailing event is not fatal; the accumulated text stands.
@@ -774,11 +1186,13 @@ async function request(
   const startedAt = Date.now();
   const streaming = Boolean(options.onDelta);
   const requestChars = messages.reduce((total, message) => total + message.content.length, 0);
+  const protocol = protocolOf(config.kind);
+  const url = protocolEndpoint(protocol, config, streaming);
   const callBase = {
     phase,
     provider: config.kind,
     model: config.model,
-    url: sanitizeUrl(endpoint(config.baseUrl)),
+    url: sanitizeUrl(url),
   };
   // Capture telemetry for the log without disturbing the caller's callbacks:
   // usage is forwarded to the caller exactly once, after a successful call,
@@ -811,54 +1225,26 @@ async function request(
   });
   let droppedFields: string[] = [];
   try {
-    const body: Record<string, unknown> = {
-      model: config.model,
-      messages,
-      temperature: options.temperature ?? 0.2,
-      max_tokens: options.maxTokens ?? 8000,
-      stream: streaming,
-    };
-    if (streaming) body.stream_options = { include_usage: true };
-    if (json) body.response_format = { type: "json_object" };
-    if (config.reasoningEffort && config.reasoningEffort !== "auto") {
-      body.reasoning_effort = config.reasoningEffort;
-    }
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
-    let response = await resilientFetch(
-      endpoint(config.baseUrl),
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      },
+    const body = protocolBody(protocol, config, messages, options, json, streaming);
+    const headers: Record<string, string> = protocolHeaders(protocol, config.apiKey);
+    const fetchBody = (): RequestInit => ({
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
       signal,
-    );
-    // Some OpenAI-compatible servers reject response_format or
-    // reasoning_effort. Retry once per optional field; the caller still
-    // validates JSON, so dropping them is safe.
-    const optionalFields = [
-      ...(json && body.response_format ? ["response_format"] : []),
-      ...(body.reasoning_effort ? ["reasoning_effort"] : []),
-      ...(streaming && body.stream_options ? ["stream_options"] : []),
-    ];
+    });
+    let response = await resilientFetch(url, fetchBody(), signal);
+    // Some endpoints reject optional fields (response_format, reasoning,
+    // temperature, thinking). Retry once per field; the caller still validates
+    // JSON, so dropping them is safe.
+    const optionalFields = protocolOptionalFields(protocol, body, json, streaming);
     for (const field of optionalFields) {
       if (response.ok || response.status !== 400) break;
       await response.text().catch(() => "");
-      delete body[field];
+      deleteBodyField(body, field);
       droppedFields = [...droppedFields, field];
       logLlm({ event: "http", ...callBase, status: 400, error: `retrying without ${field}` });
-      response = await resilientFetch(
-        endpoint(config.baseUrl),
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          signal,
-        },
-        signal,
-      );
+      response = await resilientFetch(url, fetchBody(), signal);
     }
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -870,18 +1256,9 @@ async function request(
         response,
         loggedOptions,
         callBase,
-        () =>
-          resilientFetch(
-            endpoint(config.baseUrl),
-            {
-              method: "POST",
-              headers,
-              body: JSON.stringify(body),
-              signal,
-            },
-            signal,
-          ),
+        () => resilientFetch(url, fetchBody(), signal),
         diagnostics,
+        protocol,
       );
       forwardUsage();
       logLlm({
@@ -898,17 +1275,7 @@ async function request(
       });
       return text;
     }
-    const refetchJson = (): Promise<Response> =>
-      resilientFetch(
-        endpoint(config.baseUrl),
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          signal,
-        },
-        signal,
-      );
+    const refetchJson = (): Promise<Response> => resilientFetch(url, fetchBody(), signal);
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const attemptResponse = attempt === 1 ? response : await refetchJson();
       const rawBody = await attemptResponse.text();
@@ -921,9 +1288,9 @@ async function request(
           `Raw response:\n${clipPreview(rawBody, 4_000)}`,
         );
       }
-      const usage = extractUsage(value);
-      if (usage) lastUsage = usage;
-      const text = extractContent(value, rawBody);
+      const parsed = parseResponseValue(protocol, value, rawBody);
+      if (parsed.usage) lastUsage = parsed.usage;
+      const text = parsed.text;
       if (text) {
         forwardUsage();
         logLlm({
@@ -940,7 +1307,7 @@ async function request(
         return text;
       }
       if (attempt === 2 || signal.aborted) {
-        throw emptyBodyError(Boolean(usage), rawBody, phase);
+        throw emptyBodyError(Boolean(parsed.usage), rawBody, phase);
       }
       logLlm({
         event: "http",
@@ -987,6 +1354,7 @@ async function streamWithEmptyRetry(
   callBase: { phase?: string; provider?: string; model?: string; url?: string },
   refetch: () => Promise<Response>,
   sink?: StreamDiagnostics,
+  protocol: Protocol = "chat",
 ): Promise<string> {
   let forwarded = false;
   const watched: CompletionOptions = options.onDelta
@@ -1006,6 +1374,7 @@ async function streamWithEmptyRetry(
         attemptResponse,
         { ...watched, phase: options.phase },
         attemptDiagnostics,
+        protocol,
       );
       if (sink) Object.assign(sink, attemptDiagnostics);
       return text;

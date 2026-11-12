@@ -34,7 +34,7 @@ export interface ProjectInfo {
 export type ReasoningEffort = "auto" | "low" | "medium" | "high";
 
 export interface ProviderSettings {
-  kind: "none" | "openai-compatible" | "ollama";
+  kind: "none" | "openai-compatible" | "openai-responses" | "anthropic" | "gemini" | "ollama";
   baseUrl: string;
   model: string;
   hasApiKey: boolean;
@@ -411,6 +411,16 @@ export interface ChatMessage {
   details?: string;
 }
 
+/** One visible tool call or error row inside the streaming activity feed. */
+export interface ChatStreamActivity {
+  id: string;
+  tool: string;
+  /** Compact argument/result preview, e.g. `read_file src/app.ts`. */
+  detail: string;
+  isError?: boolean;
+  at: string;
+}
+
 /**
  * Transient token stream rendered under the chat history. It is never persisted:
  * the completed assistant message replaces it once the turn settles.
@@ -419,7 +429,11 @@ export interface ChatStream {
   id: string;
   label: string;
   content: string;
+  /** Accumulated model thinking/reasoning text, shown dimmed. */
+  reasoning: string;
   phase: "thinking" | "responding";
+  /** Tool calls and errors observed so far in this turn (open, OpenCode-style). */
+  activity: ChatStreamActivity[];
   createdAt: string;
   versionId?: string;
 }
@@ -554,6 +568,8 @@ export const IPC_CHANNELS = {
   saveSettings: "jin:save-settings",
   getLlmLogPath: "jin:get-llm-log-path",
   openLlmLogFolder: "jin:open-llm-log-folder",
+  getGlobalAgentsMd: "jin:get-global-agents-md",
+  saveGlobalAgentsMd: "jin:save-global-agents-md",
   getTools: "jin:get-tools",
   refreshTools: "jin:refresh-tools",
   searchExtensions: "jin:search-extensions",
@@ -610,6 +626,10 @@ export interface JinBridge {
   getLlmLogPath(): Promise<string>;
   /** Reveal the LLM diagnostics log folder in the OS file manager. */
   openLlmLogFolder(): Promise<void>;
+  /** Global AGENTS.md rules file (userData) content and absolute path. */
+  getGlobalAgentsMd(): Promise<{ content: string; path: string }>;
+  /** Overwrite the global AGENTS.md rules file. */
+  saveGlobalAgentsMd(content: string): Promise<{ path: string }>;
   getTools(): Promise<ToolsInfo>;
   refreshTools(): Promise<ToolsInfo>;
   searchExtensions(query: string, limit?: number): Promise<MarketplaceSearchResult>;

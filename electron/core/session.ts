@@ -36,6 +36,7 @@ import type {
   AppState,
   ChatMessage,
   ChatStream,
+  ChatStreamActivity,
   ContextUsage,
   FileContent,
   FileNode,
@@ -74,6 +75,7 @@ import type { LspFacts } from "./lsp/client";
 import { planWithProvider } from "./agent/llm-planner";
 import { normalizePlan } from "./agent/normalize-plan";
 import type { PlanDraft } from "./agent/plan-types";
+import { readProjectAgentsMd } from "./rules/agents-md";
 import {
   ProviderError,
   type ProviderConfig,
@@ -130,6 +132,8 @@ export interface SessionDeps {
   settings: SettingsStore;
   recentProjects: () => import("../../shared/ipc").RecentProject[];
   emit: (event: JinEvent) => void;
+  /** Global AGENTS.md rules content, read fresh per turn. */
+  globalRules?: () => string;
   /** Shared app-level VS Code Marketplace store, when available. */
   marketplace?: LspMarketplace;
 }
@@ -741,7 +745,9 @@ export class ProjectSession {
       id: this.streamId,
       label,
       content: "",
+      reasoning: "",
       phase: "thinking",
+      activity: [],
       createdAt: nowIso(),
       ...(versionId ? { versionId } : {}),
     };
@@ -751,15 +757,42 @@ export class ProjectSession {
   /** Replace the transient stream text. Provider deltas are accumulated by callers. */
   private updateStream(
     content: string,
-    options: { label?: string; phase?: ChatStream["phase"] } = {},
+    options: { label?: string; phase?: ChatStream["phase"]; reasoning?: string } = {},
   ): void {
     if (!this.stream) return;
     this.stream = {
       ...this.stream,
       content: content.length > 12_000 ? content.slice(-12_000) : content,
+      ...(options.reasoning !== undefined
+        ? {
+            reasoning:
+              options.reasoning.length > 8_000
+                ? `…${options.reasoning.slice(-8_000)}`
+                : options.reasoning,
+          }
+        : {}),
       label: options.label ?? this.stream.label,
       phase: options.phase ?? this.stream.phase,
     };
+    this.scheduleStreamEmit();
+  }
+
+  /** Append one tool call / error row to the visible activity feed. */
+  private pushActivity(tool: string, detail: string, isError?: boolean): void {
+    if (!this.stream) return;
+    const entry: ChatStreamActivity = {
+      id: ulid(),
+      tool: tool.slice(0, 60),
+      detail: detail.length > 300 ? `${detail.slice(0, 300)}…` : detail,
+      at: nowIso(),
+      ...(isError ? { isError: true } : {}),
+    };
+    const activity = [...this.stream.activity, entry].slice(-100);
+    this.stream = { ...this.stream, activity };
+    this.scheduleStreamEmit();
+  }
+
+  private scheduleStreamEmit(): void {
     if (!this.streamTimer) {
       this.streamTimer = setTimeout(() => {
         this.streamTimer = null;
@@ -1179,10 +1212,12 @@ export class ProjectSession {
       let plan: PlanDraft;
       this.startStream(this.t("chat.streamPlanning"));
       let raw = "";
+      let reasoning = "";
       try {
         plan = await planWithProvider(provider as ProviderConfig, request, {
           snapshot: this.snapshot,
           skills: this.skills.promptFor(request),
+          rules: this.agentRules(),
           reuseSummary:
             reusePlan.summary +
             "\n" +
@@ -1193,12 +1228,21 @@ export class ProjectSession {
           history,
           signal,
           onUsage: (usage) => this.recordUsage("plan", provider.model, usage),
+          onReasoning: (delta) => {
+            if (signal.aborted) return;
+            reasoning += delta;
+            this.updateStream(raw, {
+              reasoning,
+              ...(raw ? {} : { phase: "thinking" as const }),
+            });
+          },
           onDelta: (delta) => {
             if (signal.aborted) return;
             raw += delta;
             const preview = streamingPreview(raw, ["message", "goal"]);
             if (preview) {
               this.updateStream(preview, {
+                reasoning,
                 label: this.t("chat.streamPlanning"),
                 phase: "responding",
               });
@@ -1700,6 +1744,28 @@ export class ProjectSession {
     return this.getState();
   }
 
+  /**
+   * AGENTS.md rules for prompts: project-level file from the repo root plus
+   * the global user-level file (via deps), read fresh every turn. Empty when
+   * neither file exists so callers can skip the prompt section entirely.
+   */
+  private agentRules(): string {
+    const sections: string[] = [];
+    try {
+      const project = readProjectAgentsMd(this.root);
+      if (project.trim()) {
+        sections.push(`PROJECT RULES (AGENTS.md in the project root):\n${project.trim()}`);
+      }
+    } catch {
+      // A missing or unreadable project file must not break the turn.
+    }
+    const global = this.deps.globalRules?.() ?? "";
+    if (global.trim()) {
+      sections.push(`GLOBAL RULES (user-level AGENTS.md):\n${global.trim()}`);
+    }
+    return sections.join("\n\n");
+  }
+
   private fileContext(paths: readonly string[], maxChars = 80_000, root = this.root): string {
     const chunks: string[] = [];
     let total = 0;
@@ -1812,6 +1878,10 @@ Rules:
 - Keep the change within approved files or their conventional test companions. Do not add helper files unless they are explicitly present in the approved architecture scope.
 - Work until the implementation is complete, then finish with a short plain-text summary of what changed.
 - If an approved file cannot be implemented, explain why in the summary instead of inventing unrelated files.`;
+      const agentRules = this.agentRules();
+      const systemPrompt = agentRules
+        ? `${ekoSystem}\n\nRULES FROM AGENTS.md (must be respected while implementing):\n${agentRules}`
+        : ekoSystem;
       const settings = this.deps.settings.get();
       const allowedPaths = implementationScopePaths(
         proposal.intent,
@@ -1861,6 +1931,8 @@ Rules:
       let rawEditBatches: Array<{ edits: unknown[]; scope: ReadonlySet<string> }> = [];
       let summary = "";
       let notes: string[] = [];
+      let ekoThinking = "";
+      let ekoContent = "";
       this.agentStatus = {
         ...this.agentStatus,
         message: this.t("session.ekoImplementing"),
@@ -1877,7 +1949,7 @@ Rules:
             const eko = await runEkoCoder({
               root: workerWorkspace,
               provider: provider as ProviderConfig,
-              system: ekoSystem,
+              system: systemPrompt,
               task: `${worker.text}\n\nImplement only the assigned task using the staging tools. Finish with a short summary.`,
               temperature: settings.agent.temperature,
               maxTokens: settings.agent.maxTokens,
@@ -1888,12 +1960,27 @@ Rules:
               reusePlan,
               searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
               onUsage: (usage) => this.recordUsage("eko", provider.model, usage),
+              onThinking: (text) => {
+                if (signal.aborted) return;
+                ekoThinking = text;
+                this.updateStream(ekoContent, {
+                  reasoning: ekoThinking,
+                  label: `${workerLabel} · ${this.t("chat.streamImplementing")}`,
+                  ...(ekoContent ? {} : { phase: "thinking" as const }),
+                });
+              },
               onText: (text, done) => {
                 if (signal.aborted) return;
-                this.updateStream(text, {
+                ekoContent = text;
+                this.updateStream(ekoContent, {
+                  reasoning: ekoThinking,
                   label: `${workerLabel} · ${this.t("chat.streamImplementing")}`,
                   phase: done ? "thinking" : "responding",
                 });
+              },
+              onActivity: (entry) => {
+                if (signal.aborted) return;
+                this.pushActivity(entry.tool, entry.detail, entry.isError);
               },
               onProgress: (message) => {
                 if (signal.aborted) return;

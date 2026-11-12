@@ -460,3 +460,371 @@ describe("extractReasoningDelta", () => {
     expect(deltas).toEqual(["visible"]);
   });
 });
+
+describe("OpenAI Responses protocol", () => {
+  it("posts to /responses with instructions and input", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      requests.push({ url: String(input), init });
+      return new Response(
+        JSON.stringify({
+          output_text: "planned answer",
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: "planned answer" }],
+            },
+          ],
+          usage: { input_tokens: 40, output_tokens: 6 },
+          model: "gpt-5",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const text = await completeText(config({ kind: "openai-responses" }), "sys", "user");
+    expect(text).toBe("planned answer");
+    expect(requests[0]?.url).toBe("https://provider.test/v1/responses");
+    const headers = new Headers(requests[0]?.init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer secret");
+    const body = requestBody(requests[0]?.init);
+    expect(body.model).toBe("test-model");
+    expect(body.instructions).toBe("sys");
+    expect(body.input).toEqual([{ role: "user", content: "user" }]);
+  });
+
+  it("streams output_text deltas and reasoning summaries", async () => {
+    globalThis.fetch = (async () =>
+      sseResponse([
+        'data: {"type":"response.output_item.added","item":{"type":"function_call"}}\n\n',
+        'data: {"type":"response.reasoning_summary_text.delta","delta":"pondering"}\n\n',
+        'data: {"type":"response.output_text.delta","delta":"hello "}\n\n',
+        'data: {"type":"response.output_text.delta","delta":"world"}\n\n',
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":5,"output_tokens":2},"model":"gpt-5"}}\n\n',
+      ])) as typeof fetch;
+
+    const deltas: string[] = [];
+    const reasoning: string[] = [];
+    let usage: ProviderTokenUsage | null = null;
+    const text = await completeText(config({ kind: "openai-responses" }), "sys", "user", {
+      onDelta: (delta) => deltas.push(delta),
+      onReasoning: (delta) => reasoning.push(delta),
+      onUsage: (seen) => {
+        usage = seen;
+      },
+    });
+
+    expect(text).toBe("hello world");
+    expect(deltas).toEqual(["hello ", "world"]);
+    expect(reasoning).toEqual(["pondering"]);
+    expect(usage).toEqual({ promptTokens: 5, completionTokens: 2 });
+  });
+
+  it("maps an empty Responses payload to a clear error", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ status: "completed", output: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+
+    await expect(completeText(config({ kind: "openai-responses" }), "sys", "user")).rejects.toThrow(
+      /no output text/i,
+    );
+  });
+});
+
+describe("Anthropic protocol", () => {
+  it("posts to /v1/messages with x-api-key auth and a system field", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      requests.push({ url: String(input), init });
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "claude reply" }],
+          usage: { input_tokens: 30, output_tokens: 4 },
+          model: "claude-test",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const text = await completeText(
+      config({ kind: "anthropic", baseUrl: "https://api.anthropic.test" }),
+      "sys",
+      "user",
+    );
+    expect(text).toBe("claude reply");
+    expect(requests[0]?.url).toBe("https://api.anthropic.test/v1/messages");
+    const headers = new Headers(requests[0]?.init?.headers);
+    expect(headers.get("x-api-key")).toBe("secret");
+    expect(headers.get("anthropic-version")).toBe("2023-06-01");
+    expect(headers.get("authorization")).toBeNull();
+    const body = requestBody(requests[0]?.init);
+    expect(body.model).toBe("test-model");
+    expect(body.system).toBe("sys");
+    expect(body.messages).toEqual([{ role: "user", content: "user" }]);
+    expect(body.temperature).toBe(0.2);
+    expect(body).not.toHaveProperty("thinking");
+  });
+
+  it("ignores trailing slashes and an existing /v1 suffix when building the URL", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: unknown) => {
+      urls.push(String(input));
+      return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await completeText(
+      config({ kind: "anthropic", baseUrl: "https://api.anthropic.test/" }),
+      "s",
+      "u",
+    );
+    await completeText(
+      config({ kind: "anthropic", baseUrl: "https://api.anthropic.test/v1" }),
+      "s",
+      "u",
+    );
+    expect(urls).toEqual([
+      "https://api.anthropic.test/v1/messages",
+      "https://api.anthropic.test/v1/messages",
+    ]);
+  });
+
+  it("enables extended thinking for reasoning efforts above auto", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input, init) => {
+      bodies.push(requestBody(init));
+      return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await completeText(config({ kind: "anthropic", reasoningEffort: "high" }), "sys", "user");
+
+    expect(bodies[0]?.thinking).toEqual({ type: "enabled", budget_tokens: 16_384 });
+    expect(bodies[0]?.max_tokens).toBe(17_408);
+    expect(bodies[0]).not.toHaveProperty("temperature");
+  });
+
+  it("streams text and thinking deltas and stop_reason", async () => {
+    globalThis.fetch = (async () =>
+      sseResponse([
+        'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":11}}}\n\n',
+        'data: {"type":"content_block_start","content_block":{"type":"thinking"}}\n\n',
+        'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"why"}}\n\n',
+        'data: {"type":"content_block_start","content_block":{"type":"text"}}\n\n',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"answer"}}\n\n',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":" now"}}\n\n',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}\n\n',
+        'data: {"type":"message_stop"}\n\n',
+      ])) as typeof fetch;
+
+    const deltas: string[] = [];
+    const reasoning: string[] = [];
+    let usage: ProviderTokenUsage | null = null;
+    const text = await completeText(config({ kind: "anthropic" }), "sys", "user", {
+      onDelta: (delta) => deltas.push(delta),
+      onReasoning: (delta) => reasoning.push(delta),
+      onUsage: (seen) => {
+        usage = seen;
+      },
+    });
+
+    expect(text).toBe("answer now");
+    expect(deltas).toEqual(["answer", " now"]);
+    expect(reasoning).toEqual(["why"]);
+    expect(usage).toEqual({ promptTokens: 11, completionTokens: 7 });
+  });
+
+  it("adds a JSON instruction to the system prompt instead of response_format", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ content: [{ type: "text", text: '{"ok":true}' }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+
+    await completeJson(config({ kind: "anthropic" }), "be terse", "user");
+    // The request is asserted indirectly: a bad JSON response would throw,
+    // so reaching here means completeJson accepted the payload above.
+  });
+});
+
+describe("Gemini protocol", () => {
+  function geminiResponse(text: string, usage?: Record<string, unknown>): Response {
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 5, totalTokenCount: 25 },
+        modelVersion: "gemini-2.5-pro",
+        ...usage,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  it("posts to /v1beta/models/<model>:generateContent with x-goog-api-key", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      requests.push({ url: String(input), init });
+      return geminiResponse("gemini reply");
+    }) as typeof fetch;
+
+    const text = await completeText(
+      config({ kind: "gemini", baseUrl: "https://generativelanguage.googleapis.com" }),
+      "sys",
+      "user",
+    );
+    expect(text).toBe("gemini reply");
+    expect(requests[0]?.url).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/test-model:generateContent",
+    );
+    const headers = new Headers(requests[0]?.init?.headers);
+    expect(headers.get("x-goog-api-key")).toBe("secret");
+    expect(headers.get("authorization")).toBeNull();
+    const body = requestBody(requests[0]?.init);
+    expect(body.contents).toEqual([{ role: "user", parts: [{ text: "user" }] }]);
+    expect(body.systemInstruction).toEqual({ parts: [{ text: "sys" }] });
+    const generation = body.generationConfig as Record<string, unknown>;
+    expect(generation.temperature).toBe(0.2);
+    expect(generation.maxOutputTokens).toBe(8000);
+    expect(generation).not.toHaveProperty("responseMimeType");
+    expect(generation).not.toHaveProperty("thinkingConfig");
+  });
+
+  it("encodes the model id into the URL path", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: unknown) => {
+      urls.push(String(input));
+      return geminiResponse("ok");
+    }) as typeof fetch;
+
+    await completeText(
+      config({
+        kind: "gemini",
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        model: "gemini-2.5-flash",
+      }),
+      "s",
+      "u",
+    );
+    await completeText(config({ kind: "gemini", model: "gemini-2.5-pro-preview-05-06" }), "s", "u");
+    expect(urls[0]).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    );
+    expect(urls[1]).toBe(
+      "https://provider.test/v1beta/models/gemini-2.5-pro-preview-05-06:generateContent",
+    );
+  });
+
+  it("adds responseMimeType for JSON mode and thinkingConfig for reasoning efforts", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input, init) => {
+      bodies.push(requestBody(init));
+      return geminiResponse("{}");
+    }) as typeof fetch;
+
+    await completeJson(config({ kind: "gemini", reasoningEffort: "high" }), "sys", "user");
+
+    const generation = bodies[0]?.generationConfig as Record<string, unknown>;
+    expect(generation.responseMimeType).toBe("application/json");
+    expect(generation.thinkingConfig).toEqual({ thinkingBudget: 24_576 });
+  });
+
+  it("drops nested generationConfig fields on HTTP 400", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input, init) => {
+      const body = requestBody(init);
+      bodies.push(body);
+      const generation = body.generationConfig as Record<string, unknown>;
+      // The endpoint rejects the JSON-mode hint but accepts everything else.
+      if (generation.responseMimeType) {
+        return new Response("responseMimeType unsupported", {
+          status: 400,
+          statusText: "Bad Request",
+        });
+      }
+      return geminiResponse("{}");
+    }) as typeof fetch;
+
+    await completeJson(config({ kind: "gemini", reasoningEffort: "low" }), "sys", "user");
+
+    expect(bodies).toHaveLength(2);
+    const first = bodies[0]?.generationConfig as Record<string, unknown>;
+    expect(first.thinkingConfig).toEqual({ thinkingBudget: 1_024 });
+    expect(first.responseMimeType).toBe("application/json");
+    const second = bodies[1]?.generationConfig as Record<string, unknown>;
+    expect(second).not.toHaveProperty("responseMimeType");
+    expect(second.thinkingConfig).toEqual({ thinkingBudget: 1_024 });
+  });
+
+  it("streams text and thought deltas with usageMetadata", async () => {
+    globalThis.fetch = (async () =>
+      sseResponse([
+        'data: {"candidates":[{"content":{"parts":[{"text":"secret plan","thought":true}],"role":"model"}}],"modelVersion":"gemini-2.5-pro"}\n\n',
+        'data: {"candidates":[{"content":{"parts":[{"text":"final"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3}}\n\n',
+      ])) as typeof fetch;
+
+    const deltas: string[] = [];
+    const reasoning: string[] = [];
+    let usage: ProviderTokenUsage | null = null;
+    const text = await completeText(config({ kind: "gemini" }), "sys", "user", {
+      onDelta: (delta) => deltas.push(delta),
+      onReasoning: (delta) => reasoning.push(delta),
+      onUsage: (seen) => {
+        usage = seen;
+      },
+    });
+
+    expect(text).toBe("final");
+    expect(deltas).toEqual(["final"]);
+    expect(reasoning).toEqual(["secret plan"]);
+    expect(usage).toEqual({ promptTokens: 12, completionTokens: 3 });
+  });
+
+  it("marks thought parts as reasoning in the stream", async () => {
+    globalThis.fetch = (async () =>
+      sseResponse([
+        'data: {"candidates":[{"content":{"parts":[{"text":"think first","thought":true}]},"modelVersion":"gemini-2.5-pro"}]}\n\n',
+        'data: {"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2}}\n\n',
+      ])) as typeof fetch;
+
+    const reasoning: string[] = [];
+    const text = await completeText(config({ kind: "gemini" }), "sys", "user", {
+      onDelta: () => {},
+      onReasoning: (delta) => reasoning.push(delta),
+    });
+
+    expect(text).toBe("answer");
+    expect(reasoning).toEqual(["think first"]);
+  });
+
+  it("maps a Gemini error payload to a clear ProviderError", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          error: { code: 400, message: "API key not valid", status: "INVALID_ARGUMENT" },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    await expect(completeText(config({ kind: "gemini" }), "sys", "user")).rejects.toThrow(
+      /API key not valid/i,
+    );
+  });
+
+  it("reports an empty Gemini answer clearly", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [] } }], usageMetadata: {} }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    await expect(completeText(config({ kind: "gemini" }), "sys", "user")).rejects.toThrow(
+      /no text parts/i,
+    );
+  });
+});

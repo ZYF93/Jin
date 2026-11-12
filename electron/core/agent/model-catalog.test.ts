@@ -3,6 +3,7 @@ import { afterAll, describe, expect, it } from "vite-plus/test";
 import {
   fetchModelCatalog,
   modelEndpointCandidates,
+  parseGeminiModelPayload,
   parseOllamaModelPayload,
   parseOpenAIModelPayload,
   reasoningEffortsForModel,
@@ -34,6 +35,15 @@ describe("modelEndpointCandidates", () => {
       "http://127.0.0.1:11434/api/tags",
     ]);
     expect(modelEndpointCandidates("none", "http://127.0.0.1:11434")).toEqual([]);
+  });
+
+  it("builds the Gemini v1beta models endpoint", () => {
+    expect(modelEndpointCandidates("gemini", "https://generativelanguage.googleapis.com")).toEqual([
+      "https://generativelanguage.googleapis.com/v1beta/models",
+    ]);
+    expect(modelEndpointCandidates("gemini", "https://ai.test/v1beta")).toEqual([
+      "https://ai.test/v1beta/models",
+    ]);
   });
 
   it("rejects non-http URLs", () => {
@@ -83,6 +93,34 @@ describe("parseOpenAIModelPayload", () => {
   it("returns an empty list for malformed payloads", () => {
     expect(parseOpenAIModelPayload(null)).toEqual([]);
     expect(parseOpenAIModelPayload({ data: "nope" })).toEqual([]);
+  });
+});
+
+describe("parseGeminiModelPayload", () => {
+  it("strips the models/ path prefix and uses displayName as the label", () => {
+    const models = parseGeminiModelPayload({
+      models: [
+        {
+          name: "models/gemini-2.5-pro",
+          displayName: "Gemini 2.5 Pro",
+        },
+        { name: "models/gemini-2.5-flash" },
+        "bare-entry",
+        { displayName: "no name field" },
+      ],
+    });
+    expect(models.map((model) => model.id).sort()).toEqual(["gemini-2.5-flash", "gemini-2.5-pro"]);
+    expect(models.find((model) => model.id === "gemini-2.5-pro")).toMatchObject({
+      id: "gemini-2.5-pro",
+      name: "Gemini 2.5 Pro",
+      reasoningEfforts: ["auto", "low", "medium", "high"],
+    });
+    expect(models.find((model) => model.id === "gemini-2.5-flash")?.name).toBe("gemini-2.5-flash");
+  });
+
+  it("returns an empty list for malformed payloads", () => {
+    expect(parseGeminiModelPayload(null)).toEqual([]);
+    expect(parseGeminiModelPayload({ models: "nope" })).toEqual([]);
   });
 });
 

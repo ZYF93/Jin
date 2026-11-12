@@ -57,6 +57,11 @@ import {
 import { SettingsStore } from "./core/settings/app-settings";
 import { UpdateService } from "./core/update/update-service";
 import { currentLlmLogPath, initLlmLog, llmLogDir } from "./core/log/llm-log";
+import {
+  globalAgentsMdPath,
+  readGlobalAgentsMd,
+  writeGlobalAgentsMd,
+} from "./core/rules/agents-md";
 import { fetchModelCatalog, ModelCatalogError } from "./core/agent/model-catalog";
 import {
   gitBranches,
@@ -318,6 +323,7 @@ async function openProjectPath(
     settings: requireSettings(),
     recentProjects,
     emit: (event) => sendEvent(event),
+    globalRules: () => readGlobalAgentsMd(app.getPath("userData")),
     marketplace: requireMarketplace(),
   });
 
@@ -694,6 +700,15 @@ function registerIpcHandlers(): void {
     const error = await shell.openPath(dir);
     if (error) throw new Error(error);
   });
+  ipcMain.handle(IPC_CHANNELS.getGlobalAgentsMd, () => {
+    const dir = app.getPath("userData");
+    return { content: readGlobalAgentsMd(dir), path: globalAgentsMdPath(dir) };
+  });
+  ipcMain.handle(IPC_CHANNELS.saveGlobalAgentsMd, (_event, content: unknown) => {
+    if (typeof content !== "string") throw new Error(t("error.settingsObject"));
+    const path = writeGlobalAgentsMd(app.getPath("userData"), content);
+    return { path };
+  });
   ipcMain.handle(IPC_CHANNELS.saveSettings, (_event, patch: unknown): AppSettings => {
     if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
       throw new Error(t("error.settingsObject"));
@@ -826,7 +841,14 @@ function registerIpcHandlers(): void {
         throw new ModelCatalogError("Invalid model catalog request.");
       }
       const request = input as Partial<ProviderModelRequest>;
-      if (request.kind !== "openai-compatible" && request.kind !== "ollama") {
+      const allowedKinds: ReadonlySet<ProviderModelRequest["kind"]> = new Set([
+        "openai-compatible",
+        "openai-responses",
+        "anthropic",
+        "gemini",
+        "ollama",
+      ]);
+      if (typeof request.kind !== "string" || !allowedKinds.has(request.kind)) {
         throw new ModelCatalogError("Choose a provider before fetching models.");
       }
       if (typeof request.baseUrl !== "string" || !request.baseUrl.trim()) {

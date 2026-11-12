@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { ArchNode, ArchSnapshot } from "../../../shared/ledger/types";
 import { emptySnapshot } from "../arch/snapshot";
+import { ProviderError } from "./provider";
 import { architectureSummary, plannerContextBudget, planWithProvider } from "./llm-planner";
+
+process.env.JIN_QUIET = "1";
 
 function node(partial: Partial<ArchNode> & Pick<ArchNode, "id" | "level" | "name">): ArchNode {
   return {
@@ -189,6 +192,24 @@ describe("planWithProvider classification", () => {
     );
   });
 
+  it("injects AGENTS.md rules into the planning prompt", async () => {
+    await withResponse(
+      { kind: "plan", title: "T", goal: "G", ops: [], tasks: [], nodeIntents: [] },
+      async (body) => {
+        await planWithProvider(config, "Change it", {
+          snapshot: emptySnapshot(),
+          skills: "",
+          reuseSummary: "",
+          rules: "Always use pnpm. Never touch .jin/.",
+        });
+        const messages = body.messages as Array<{ role: string; content: string }>;
+        const user = messages.find((message) => message.role === "user");
+        expect(user?.content).toContain("Rules from AGENTS.md (must be respected):");
+        expect(user?.content).toContain("Always use pnpm. Never touch .jin/.");
+      },
+    );
+  });
+
   it("treats a response without a kind as a plan for compatibility", async () => {
     await withResponse({ title: "Legacy", goal: "Legacy plan", ops: [] }, async () => {
       const draft = await planWithProvider(config, "Change it", {
@@ -198,6 +219,99 @@ describe("planWithProvider classification", () => {
       });
       expect(draft.kind).toBe("plan");
       expect(draft.title).toBe("Legacy");
+    });
+  });
+
+  it("unwraps a single nested container object", async () => {
+    await withResponse(
+      {
+        data: {
+          kind: "plan",
+          title: "Wrapped",
+          goal: "Wrapped goal",
+          ops: [],
+          nodeIntents: [],
+          tasks: [],
+        },
+      },
+      async () => {
+        const draft = await planWithProvider(config, "Change it", {
+          snapshot: emptySnapshot(),
+          skills: "",
+          reuseSummary: "",
+        });
+        expect(draft.kind).toBe("plan");
+        expect(draft.title).toBe("Wrapped");
+      },
+    );
+  });
+
+  it("accepts common title/goal aliases", async () => {
+    await withResponse(
+      { kind: "plan", name: "Aliased", description: "Aliased goal", ops: [] },
+      async () => {
+        const draft = await planWithProvider(config, "Change it", {
+          snapshot: emptySnapshot(),
+          skills: "",
+          reuseSummary: "",
+        });
+        expect(draft.kind).toBe("plan");
+        expect(draft.title).toBe("Aliased");
+        expect(draft.goal).toBe("Aliased goal");
+      },
+    );
+  });
+
+  it("repairs once when the first response lacks title and goal", async () => {
+    const original = globalThis.fetch;
+    const payloads = [
+      { message: "Let me think about it." },
+      { kind: "plan", title: "Repaired", goal: "Repaired goal", ops: [], tasks: [] },
+    ];
+    let call = 0;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const payload = payloads[Math.min(call, payloads.length - 1)];
+      call += 1;
+      if (call === 2) {
+        const rawBody = typeof init?.body === "string" ? init.body : "{}";
+        const messages = JSON.parse(rawBody).messages as Array<{
+          content: string;
+        }>;
+        expect(messages[messages.length - 1]?.content).toContain("title");
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      const draft = await planWithProvider(config, "Change it", {
+        snapshot: emptySnapshot(),
+        skills: "",
+        reuseSummary: "",
+      });
+      expect(draft.kind).toBe("plan");
+      expect(draft.title).toBe("Repaired");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("reports the raw model JSON when the schema still does not match", async () => {
+    await withResponse({ kind: "plan", summary: "No title here" }, async () => {
+      let failure: unknown;
+      try {
+        await planWithProvider(config, "Change it", {
+          snapshot: emptySnapshot(),
+          skills: "",
+          reuseSummary: "",
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(ProviderError);
+      expect((failure as Error).message).toContain("missing title or goal");
+      expect((failure as { details?: string }).details).toContain("No title here");
     });
   });
 });
