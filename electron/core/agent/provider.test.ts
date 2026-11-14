@@ -828,3 +828,73 @@ describe("Gemini protocol", () => {
     );
   });
 });
+
+describe("image parts across protocols", () => {
+  const image = {
+    dataUrl: "data:image/png;base64,QUJD",
+    label: "screenshot",
+  };
+
+  it("maps image parts to OpenAI image_url in chat bodies", async () => {
+    let body: Record<string, unknown> = {};
+    globalThis.fetch = (async (_input, init) => {
+      body = JSON.parse((init as RequestInit)?.body as string);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await completeText(config({ kind: "openai-compatible" }), "s", "look", {}, [image]);
+    const user = (body.messages as Array<Record<string, unknown>>).find(
+      (message) => message.role === "user",
+    );
+    const parts = user?.content as Array<Record<string, unknown>>;
+    expect(parts.find((part) => part.type === "text")?.text).toBe("look");
+    expect(parts.find((part) => part.type === "image_url")?.image_url).toEqual({
+      url: image.dataUrl,
+    });
+  });
+
+  it("maps image parts to Anthropic base64 source blocks", async () => {
+    let body: Record<string, unknown> = {};
+    globalThis.fetch = (async (_input, init) => {
+      body = JSON.parse((init as RequestInit)?.body as string);
+      return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await completeText(config({ kind: "anthropic" }), "s", "look", {}, [image]);
+    const user = (body.messages as Array<Record<string, unknown>>).find(
+      (message) => message.role === "user",
+    );
+    const blocks = user?.content as Array<Record<string, unknown>>;
+    expect(blocks.find((block) => block.type === "image")?.source).toMatchObject({
+      type: "base64",
+      media_type: "image/png",
+      data: "QUJD",
+    });
+  });
+
+  it("maps image parts to Gemini inline_data", async () => {
+    let body: Record<string, unknown> = {};
+    globalThis.fetch = (async (_input, init) => {
+      body = JSON.parse((init as RequestInit)?.body as string);
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    await completeText(config({ kind: "gemini" }), "s", "look", {}, [image]);
+    const contents = body.contents as Array<Record<string, unknown>>;
+    const user = contents.find((message) => message.role === "user");
+    const parts = (user?.parts as Array<Record<string, unknown>>) ?? [];
+    expect(parts.find((part) => part.inline_data)?.inline_data).toMatchObject({
+      mime_type: "image/png",
+      data: "QUJD",
+    });
+  });
+});

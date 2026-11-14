@@ -435,7 +435,11 @@ function protocolEndpoint(protocol: Protocol, config: ProviderConfig, streaming:
   return `${base}/chat/completions`;
 }
 
-function protocolHeaders(protocol: Protocol, apiKey: string | null): Record<string, string> {
+function protocolHeaders(
+  protocol: Protocol,
+  apiKey: string | null,
+  customHeaders?: Record<string, string>,
+): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (!apiKey) return headers;
   if (protocol === "anthropic") {
@@ -445,6 +449,13 @@ function protocolHeaders(protocol: Protocol, apiKey: string | null): Record<stri
     headers["x-goog-api-key"] = apiKey;
   } else {
     headers.authorization = `Bearer ${apiKey}`;
+  }
+  // Custom headers win: they are how users adapt Jin to gateways and proxies
+  // that need extra auth or routing headers.
+  for (const [key, value] of Object.entries(customHeaders ?? {})) {
+    if (key.trim() && key.toLowerCase() !== "content-length") {
+      headers[key.trim()] = value;
+    }
   }
   return headers;
 }
@@ -459,10 +470,84 @@ const ANTHROPIC_THINKING_BUDGET: Record<string, number> = {
 const ANTHROPIC_JSON_INSTRUCTION =
   "Respond with exactly one valid JSON object and no text before or after it.";
 
+export interface ImageAttachment {
+  /** Data URL, e.g. `data:image/png;base64,...`. */
+  dataUrl: string;
+  label?: string;
+}
+
+export type MessagePart = { text: string } | { image: ImageAttachment };
+export type MessageContent = string | MessagePart[];
+
+export interface LlmMessage {
+  role: "system" | "user" | "assistant";
+  content: MessageContent;
+}
+
+function contentHasImage(content: MessageContent): boolean {
+  return Array.isArray(content) && content.some((part) => "image" in part);
+}
+
+function contentText(content: MessageContent): string {
+  if (typeof content === "string") return content;
+  return content.map((part) => ("text" in part ? part.text : "")).join("");
+}
+
+function anthropicContent(content: MessageContent): unknown {
+  if (typeof content === "string") return content;
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const part of content) {
+    if ("text" in part && part.text) blocks.push({ type: "text", text: part.text });
+    if ("image" in part) {
+      const match = /^data:([a-z0-9.+/_-]+);base64,(.+)$/i.exec(part.image.dataUrl);
+      blocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: match?.[1] ?? "image/png",
+          data: match?.[2] ?? part.image.dataUrl,
+        },
+      });
+    }
+  }
+  return blocks.length ? blocks : "";
+}
+
+function geminiParts(content: MessageContent): Array<Record<string, unknown>> {
+  if (typeof content === "string") return [{ text: content }];
+  const parts: Array<Record<string, unknown>> = [];
+  for (const part of content) {
+    if ("text" in part && part.text) parts.push({ text: part.text });
+    if ("image" in part) {
+      const match = /^data:([a-z0-9.+/_-]+);base64,(.+)$/i.exec(part.image.dataUrl);
+      parts.push({
+        inline_data: {
+          mime_type: match?.[1] ?? "image/png",
+          data: match?.[2] ?? part.image.dataUrl,
+        },
+      });
+    }
+  }
+  return parts.length ? parts : [{ text: "" }];
+}
+
+function openAiContent(content: MessageContent): unknown {
+  if (typeof content === "string") return content;
+  if (!contentHasImage(content)) return contentText(content);
+  const items: Array<Record<string, unknown>> = [];
+  for (const part of content) {
+    if ("text" in part && part.text) items.push({ type: "text", text: part.text });
+    if ("image" in part) {
+      items.push({ type: "image_url", image_url: { url: part.image.dataUrl } });
+    }
+  }
+  return items;
+}
+
 function protocolBody(
   protocol: Protocol,
   config: ProviderConfig,
-  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  messages: LlmMessage[],
   options: CompletionOptions,
   json: boolean,
   streaming: boolean,
@@ -474,7 +559,7 @@ function protocolBody(
   const temperature = options.temperature ?? 0.2;
   const system = messages
     .filter((message) => message.role === "system")
-    .map((message) => message.content)
+    .map((message) => contentText(message.content))
     .join("\n\n");
   const turns = messages.filter((message) => message.role !== "system");
 
@@ -485,7 +570,10 @@ function protocolBody(
     const body: Record<string, unknown> = {
       model: config.model,
       max_tokens: budget ? Math.max(maxTokens, budget + 1_024) : maxTokens,
-      messages: turns.map((message) => ({ role: message.role, content: message.content })),
+      messages: turns.map((message) => ({
+        role: message.role,
+        content: anthropicContent(message.content),
+      })),
     };
     let systemText = system;
     if (json) {
@@ -515,7 +603,7 @@ function protocolBody(
     const body: Record<string, unknown> = {
       contents: turns.map((message) => ({
         role: message.role === "assistant" ? "model" : "user",
-        parts: [{ text: message.content }],
+        parts: geminiParts(message.content),
       })),
       generationConfig,
     };
@@ -527,7 +615,10 @@ function protocolBody(
     const body: Record<string, unknown> = {
       model: config.model,
       instructions: system,
-      input: turns.map((message) => ({ role: message.role, content: message.content })),
+      input: turns.map((message) => ({
+        role: message.role,
+        content: openAiContent(message.content),
+      })),
       max_output_tokens: options.maxTokens ?? 8000,
       stream: streaming,
       temperature,
@@ -539,7 +630,10 @@ function protocolBody(
 
   const body: Record<string, unknown> = {
     model: config.model,
-    messages,
+    messages: messages.map((message) => ({
+      role: message.role,
+      content: openAiContent(message.content),
+    })),
     temperature,
     max_tokens: options.maxTokens ?? 8000,
     stream: streaming,
@@ -1158,11 +1252,15 @@ function hasToolCallDelta(value: unknown): boolean {
 }
 
 /** One prompt preview line per message, clipped, for the diagnostics log. */
-function previewMessages(messages: Array<{ role: string; content: string }>): string {
+function previewMessages(messages: LlmMessage[]): string {
   const LIMITS: Record<string, number> = { system: 600, assistant: 1_200, user: 1_500 };
   return messages
     .map(
-      (message) => `${message.role}: ${clipPreview(message.content, LIMITS[message.role] ?? 800)}`,
+      (message) =>
+        `${message.role}: ${clipPreview(
+          contentText(message.content),
+          LIMITS[message.role] ?? 800,
+        )}`,
     )
     .join("\n\n")
     .slice(0, 4_000);
@@ -1170,7 +1268,7 @@ function previewMessages(messages: Array<{ role: string; content: string }>): st
 
 async function request(
   config: ProviderConfig,
-  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  messages: LlmMessage[],
   options: CompletionOptions,
   json: boolean,
 ): Promise<string> {
@@ -1226,7 +1324,11 @@ async function request(
   let droppedFields: string[] = [];
   try {
     const body = protocolBody(protocol, config, messages, options, json, streaming);
-    const headers: Record<string, string> = protocolHeaders(protocol, config.apiKey);
+    const headers: Record<string, string> = protocolHeaders(
+      protocol,
+      config.apiKey,
+      config.customHeaders,
+    );
     const fetchBody = (): RequestInit => ({
       method: "POST",
       headers,
@@ -1460,12 +1562,17 @@ export async function completeText(
   system: string,
   user: string,
   options: CompletionOptions = {},
+  userImages: readonly ImageAttachment[] = [],
 ): Promise<string> {
+  const userContent: MessageContent =
+    userImages.length > 0
+      ? [...(user ? [{ text: user }] : []), ...userImages.map((image) => ({ image }))]
+      : user;
   return request(
     config,
     [
       { role: "system", content: system },
-      { role: "user", content: user },
+      { role: "user", content: userContent },
     ],
     { ...options, json: false },
     false,

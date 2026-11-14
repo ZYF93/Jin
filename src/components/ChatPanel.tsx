@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  Undo2,
   User,
   Wrench,
   XCircle,
@@ -63,6 +64,9 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const isSystem = message.role === "system";
   const current =
     proposal && message.proposalId && proposal.id === message.proposalId ? proposal : null;
+  const busy = useJin((state) => state.busy);
+  const undoImplementation = useJin((state) => state.undoImplementation);
+  const undoAvailable = message.kind === "implementation" && !busy;
 
   if (isSystem) {
     return (
@@ -122,6 +126,17 @@ function ChatBubble({ message }: { message: ChatMessage }) {
           <span>{formatTime(message.createdAt)}</span>
           {message.proposalId && !current && isReviewing(proposal) === false ? (
             <span>· {t("chat.historical")}</span>
+          ) : null}
+          {undoAvailable ? (
+            <button
+              type="button"
+              className="ml-1 inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-0.5 text-[8px] text-[var(--faint)] transition-colors hover:text-[var(--text)]"
+              onClick={() => void undoImplementation()}
+              title={t("chat.undoHint")}
+            >
+              <Undo2 size={9} />
+              {t("chat.undo")}
+            </button>
           ) : null}
         </div>
       </div>
@@ -340,10 +355,10 @@ export function ChatPanel() {
     stream?.label,
   ]);
 
-  const submit = (request: string): void => {
-    if (!request || disabled) return;
+  const submit = (request: string, images?: string[]): void => {
+    if ((!request && !images?.length) || disabled) return;
     stickToBottom.current = true;
-    void sendMessage(request);
+    void sendMessage(request, images);
   };
 
   return (

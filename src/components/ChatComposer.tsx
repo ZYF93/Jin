@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, CornerDownLeft, Cpu, FileCode2, Send, Sparkles } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  CornerDownLeft,
+  Cpu,
+  FileCode2,
+  Image as ImageIcon,
+  Send,
+  Sparkles,
+  X,
+} from "lucide-react";
 import type { FileNode, ProviderModel, ReasoningEffort } from "../../shared/ipc";
 import { useT } from "../lib/i18n";
 import { formatCount } from "../lib/utils";
@@ -296,7 +306,7 @@ export function ChatComposer({
   disabled: boolean;
   reviewing: boolean;
   working: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, images?: string[]) => void;
 }) {
   const t = useT();
   const app = useJin((state) => state.app);
@@ -305,10 +315,12 @@ export function ChatComposer({
   const fileTreeLoading = useJin((state) => state.fileTreeLoading);
   const loadFileTree = useJin((state) => state.loadFileTree);
   const [text, setText] = useState("");
+  const [attachments, setAttachments] = useState<File[]>([]);
   const [configOpen, setConfigOpen] = useState(false);
   const [mention, setMention] = useState<Mention | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const settings = app?.settings;
   const provider = settings?.provider;
@@ -375,13 +387,31 @@ export function ChatComposer({
     });
   };
 
-  const submit = (): void => {
+  const submit = async (): Promise<void> => {
     const request = text.trim();
-    if (!request || disabled) return;
+    if ((!request && attachments.length === 0) || disabled) return;
+    const images = await Promise.all(attachments.map(readAsDataUrl));
     setText("");
+    setAttachments([]);
     setMention(null);
     setConfigOpen(false);
-    onSend(request);
+    onSend(request, images.length ? images : undefined);
+  };
+
+  const readAsDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+      reader.onerror = () => resolve("");
+      reader.readAsDataURL(file);
+    });
+
+  const addFiles = (files: ReadonlyArray<File> | FileList | null): void => {
+    if (!files) return;
+    const picked = Array.from(files)
+      .filter((file) => file.type.startsWith("image/"))
+      .slice(0, 6);
+    if (picked.length) setAttachments((current) => [...current, ...picked].slice(0, 6));
   };
 
   const placeholder = reviewing
@@ -479,6 +509,10 @@ export function ChatComposer({
             setText(value);
             syncMention(value, event.target.selectionStart);
           }}
+          onPaste={(event) => {
+            const files = Array.from(event.clipboardData.files);
+            if (files.length) addFiles(files);
+          }}
           onKeyDown={(event) => {
             if (mention && matches.length > 0) {
               if (event.key === "ArrowDown") {
@@ -510,10 +544,30 @@ export function ChatComposer({
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              submit();
+              void submit();
             }
           }}
         />
+        {attachments.length > 0 ? (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {attachments.map((file, index) => (
+              <span
+                key={`${file.name}-${index}`}
+                className="flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--panel-soft)] px-1.5 py-0.5 text-[8px] text-[var(--faint)]"
+              >
+                <ImageIcon size={9} className="text-[var(--accent)]" />
+                <span className="max-w-[120px] truncate">{file.name}</span>
+                <button
+                  className="text-[var(--faint)] hover:text-[var(--danger)]"
+                  onClick={() => setAttachments((current) => current.filter((_, i) => i !== index))}
+                  aria-label={t("chat.removeAttachment")}
+                >
+                  <X size={8} />
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
         <div className="mt-0.5 flex items-center gap-2 px-0.5">
           <div className="min-w-0 flex-1">
             <div className="relative h-1 overflow-hidden rounded-full bg-[var(--border)]">
@@ -543,10 +597,30 @@ export function ChatComposer({
           <span className="max-w-[120px] truncate text-[8px] text-[var(--faint)]">
             {t("chat.enterHint")}
           </span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(event) => {
+              addFiles(event.target.files);
+              event.target.value = "";
+            }}
+          />
+          <button
+            className="btn h-7 w-7 shrink-0 p-0"
+            disabled={disabled}
+            onClick={() => fileInputRef.current?.click()}
+            title={t("chat.attachImage")}
+            aria-label={t("chat.attachImage")}
+          >
+            <ImageIcon size={13} />
+          </button>
           <button
             className="btn btn-primary ml-auto h-7 w-7 shrink-0 p-0"
-            disabled={disabled || !text.trim()}
-            onClick={submit}
+            disabled={disabled || (!text.trim() && attachments.length === 0)}
+            onClick={() => void submit()}
             title={t("chat.send")}
             aria-label={t("chat.sendMessage")}
           >

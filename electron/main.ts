@@ -155,10 +155,12 @@ function emptySettings(): AppSettings {
       contextWindow: 128_000,
       compactionRatio: 0.8,
     },
+    providerProfiles: [],
     agent: {
       semanticScan: true,
       temperature: 0.2,
       maxTokens: 8000,
+      maxWorkers: 0,
     },
     identity: { actorId: "user:uninitialized", name: t("common.jinUser"), email: "" },
     ui: { reduceMotion: false },
@@ -641,10 +643,16 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.mergeIntent, async () => requireSession().mergeIntent());
 
-  ipcMain.handle(IPC_CHANNELS.sendMessage, async (_event, text: unknown) => {
-    if (typeof text !== "string") throw new Error(t("error.messageTextString"));
-    return requireSession().sendMessage(text);
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.sendMessage,
+    async (_event, text: unknown, images: unknown): Promise<AppState> => {
+      if (typeof text !== "string") throw new Error(t("error.messageTextString"));
+      const attached = Array.isArray(images)
+        ? images.filter((value): value is string => typeof value === "string").slice(0, 8)
+        : [];
+      return requireSession().sendMessage(text, attached);
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.approveProposal, async (_event, id: unknown, note: unknown) => {
     if (typeof id !== "string") throw new Error(t("error.proposalIdString"));
@@ -895,6 +903,10 @@ function registerIpcHandlers(): void {
         (args as Record<string, unknown> | undefined) ?? {},
       );
     },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.undoImplementation, async (): Promise<AppState> =>
+    requireSession().undoLastImplementation(),
   );
 
   ipcMain.handle(IPC_CHANNELS.gitStatus, (): Promise<GitStatus> =>

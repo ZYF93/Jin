@@ -44,10 +44,20 @@ export interface ProviderSettings {
   contextWindow?: number;
   /** Fraction of the context window at which Jin compresses architecture context. */
   compactionRatio?: number;
+  /** How Jin shrinks the conversation when it outgrows the context budget. */
+  compactionMode?: "auto" | "trim" | "llm";
   /** Optional USD price per million prompt tokens, used for local cost metrics. */
   inputPricePerMillion?: number;
   /** Optional USD price per million completion tokens, used for local cost metrics. */
   outputPricePerMillion?: number;
+  /** Optional JSON web-search endpoint (Brave/Tavily/SearXNG) for the web_search tool. */
+  searchEndpoint?: string;
+  /** API key sent as Bearer to the search endpoint, stored like the provider key. */
+  searchApiKeySet?: boolean;
+  /** Extra headers sent with every provider request (custom gateways/proxies). */
+  customHeaders?: Record<string, string>;
+  /** True when a search API key is stored. */
+  hasSearchApiKey?: boolean;
 }
 
 /** One model advertised by a provider's model endpoint. */
@@ -62,6 +72,8 @@ export interface ProviderModel {
    */
   reasoningSource?: "remote" | "inferred" | "default";
   contextWindow?: number;
+  /** True when the model accepts image input. */
+  vision?: boolean;
 }
 
 /** Remote model and capability catalog for the settings and composer pickers. */
@@ -80,17 +92,38 @@ export interface ProviderModelRequest {
   apiKey?: string | null;
 }
 
+/** A saved provider endpoint the user can switch back to with one click. */
+export interface ProviderProfile {
+  id: string;
+  name: string;
+  kind: ProviderSettings["kind"];
+  baseUrl: string;
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  contextWindow?: number;
+  /** API key is stored encrypted under its own key, not inlined here. */
+  hasApiKey: boolean;
+}
+
 export interface AppSettings {
   /** Interface and native-menu language. WAL content keeps its authored language. */
   language: Language;
   theme: ThemeMode;
   glass: GlassStrength;
   provider: ProviderSettings;
+  /** Recent, named provider endpoints the user can re-apply instantly. */
+  providerProfiles: ProviderProfile[];
   agent: {
     /** Refine L1 kinds, responsibilities and domain tags with the configured model during a manual scan. */
     semanticScan: boolean;
     temperature: number;
     maxTokens: number;
+    /**
+     * Maximum independent sub-agent workers a single implementation can spawn.
+     * 0 means "auto" (Jin splits only when tasks are genuinely independent,
+     * up to 3). Set to 1 to always use a single worker regardless of tasks.
+     */
+    maxWorkers: number;
   };
   identity: {
     actorId: string;
@@ -124,11 +157,25 @@ export interface SettingsPatch {
   providerInputPrice?: number;
   /** USD per million completion tokens. */
   providerOutputPrice?: number;
+  /** JSON web-search endpoint for the agent's web_search tool. */
+  providerSearchEndpoint?: string;
+  /** Omit to leave unchanged; pass null to delete the stored search key. */
+  searchApiKey?: string | null;
+  /** Extra headers sent with every provider request, merged over the defaults. */
+  providerCustomHeaders?: Record<string, string>;
   /** Omit to leave unchanged; pass null to delete the stored key. */
   apiKey?: string | null;
+  /** How Jin shrinks an over-budget conversation: local trim, LLM summary, or auto. */
+  providerCompactionMode?: "auto" | "trim" | "llm";
+  /** Save the current provider as a named, reusable profile (deduped by name). */
+  saveProviderProfile?: { id?: string; name: string };
+  /** Delete a saved provider profile by id. */
+  deleteProviderProfileId?: string;
   semanticScan?: boolean;
   temperature?: number;
   maxTokens?: number;
+  /** Maximum parallel sub-agent workers for one implementation (0 = auto). */
+  agentMaxWorkers?: number;
   userName?: string;
   userEmail?: string;
   reduceMotion?: boolean;
@@ -406,6 +453,8 @@ export interface ChatMessage {
   role: ChatRole;
   kind: ChatMessageKind;
   content: string;
+  /** Images attached to the turn: project-relative paths or data URLs. */
+  images?: string[];
   createdAt: string;
   proposalId?: string;
   details?: string;
@@ -578,6 +627,7 @@ export const IPC_CHANNELS = {
   searchCode: "jin:search-code",
   listModels: "jin:list-models",
   mcpCall: "jin:mcp-call",
+  undoImplementation: "jin:undo-implementation",
   gitStatus: "jin:git-status",
   gitBranches: "jin:git-branches",
   gitCheckout: "jin:git-checkout",
@@ -610,7 +660,7 @@ export interface JinBridge {
   amendArchitecture(versionId: string): Promise<AppState>;
   /** Draft a merge intent for versions the fold skipped after a Git merge. */
   mergeIntent(): Promise<AppState>;
-  sendMessage(text: string): Promise<AppState>;
+  sendMessage(text: string, images?: string[]): Promise<AppState>;
   approveProposal(id: string, note?: string): Promise<AppState>;
   rejectProposal(id: string, note?: string): Promise<AppState>;
   retryImplementation(versionId?: string): Promise<AppState>;
@@ -639,6 +689,7 @@ export interface JinBridge {
   /** Fetch model ids and capability hints from the configured provider. */
   listModels(request: ProviderModelRequest): Promise<ProviderModelCatalog>;
   mcpCall(server: string, tool: string, args?: Record<string, unknown>): Promise<McpCallResult>;
+  undoImplementation(): Promise<AppState>;
   gitStatus(): Promise<GitStatus>;
   gitBranches(): Promise<GitBranchList>;
   /** Switch branches; remote names create a local tracking branch on first use. */

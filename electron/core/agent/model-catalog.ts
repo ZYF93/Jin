@@ -4,6 +4,7 @@ import type {
   ProviderModelRequest,
   ReasoningEffort,
 } from "../../../shared/ipc";
+import { presetFor } from "../../../shared/model-presets";
 
 const ALL_EFFORTS: ReasoningEffort[] = ["auto", "low", "medium", "high"];
 const FETCH_TIMEOUT_MS = 12_000;
@@ -231,13 +232,15 @@ function normalizeOpenAIModel(item: unknown): ProviderModel | null {
   const id = stringValue(item.id) || stringValue(item.model) || stringValue(item.name);
   if (!id) return null;
   const resolution = resolveReasoningEfforts(id, item);
-  const contextWindow = contextWindowForModel(item);
+  const preset = presetFor(id);
+  const contextWindow = contextWindowForModel(item) ?? preset?.contextWindow;
   return {
     id,
     name: stringValue(item.name) || stringValue(item.display_name) || id,
     reasoningEfforts: resolution.efforts,
     reasoningSource: resolution.source,
     ...(contextWindow ? { contextWindow } : {}),
+    ...(preset?.vision ? { vision: true } : {}),
   };
 }
 
@@ -274,11 +277,14 @@ export function parseGeminiModelPayload(payload: unknown): ProviderModel[] {
       const id = rawName.replace(/^models\//, "");
       if (!id) return null;
       const resolution = resolveReasoningEfforts(id);
+      const preset = presetFor(id);
       return {
         id,
         name: stringValue(item.displayName) || id,
         reasoningEfforts: resolution.efforts,
         reasoningSource: resolution.source,
+        ...(preset?.contextWindow ? { contextWindow: preset.contextWindow } : {}),
+        ...(preset?.vision ? { vision: true } : {}),
       };
     })
     .filter((model): model is ProviderModel => model !== null);
@@ -299,13 +305,15 @@ export function parseOllamaModelPayload(payload: unknown): ProviderModel[] {
       const id = stringValue(item.name) || stringValue(item.model);
       if (!id) return null;
       const resolution = resolveReasoningEfforts(id, item);
-      const contextWindow = contextWindowForModel(item);
+      const preset = presetFor(id);
+      const contextWindow = contextWindowForModel(item) ?? preset?.contextWindow;
       return {
         id,
         name: stringValue(item.name) || id,
         reasoningEfforts: resolution.efforts,
         reasoningSource: resolution.source,
         ...(contextWindow ? { contextWindow } : {}),
+        ...(preset?.vision ? { vision: true } : {}),
       };
     })
     .filter((model): model is ProviderModel => model !== null);

@@ -13,6 +13,7 @@ import {
   runEkoCoder,
   StagedWorkspace,
   type EkoModule,
+  withImageFetch,
 } from "./eko-runtime";
 
 const roots: string[] = [];
@@ -303,5 +304,42 @@ describe("runEkoCoder callbacks", () => {
     expect(events).toContain("activity:read_file:file body:ok");
     expect(events).toContain("activity:error:boom:err");
     expect(events).toContain("usage:10/5");
+  });
+});
+
+describe("withImageFetch", () => {
+  it("injects image_url parts into the first user message", async () => {
+    const base = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const captured = (init?.body as string) ?? "";
+      return new Response(JSON.stringify({ ok: true, captured }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const images = [{ dataUrl: "data:image/png;base64,QUJD", label: "shot" }];
+    const wrapped = withImageFetch(base as unknown as typeof fetch, images);
+    const response = await wrapped("http://x/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [
+          { role: "user", content: "look at this" },
+          { role: "assistant", content: "ok" },
+        ],
+      }),
+    });
+    const payload = await response.json();
+    const captured = JSON.parse(payload.captured);
+    const user = captured.messages[0];
+    expect(Array.isArray(user.content)).toBe(true);
+    const text = user.content.find((part: { type?: string }) => part.type === "text");
+    const image = user.content.find((part: { type?: string }) => part.type === "image_url");
+    expect(text?.text).toBe("look at this");
+    expect(image?.image_url).toEqual({ url: "data:image/png;base64,QUJD" });
+  });
+
+  it("is a no-op without images", () => {
+    const base = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    expect(withImageFetch(base, [])).toBe(base);
   });
 });

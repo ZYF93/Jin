@@ -370,6 +370,11 @@ export async function planWithProvider(
       : "",
     context.skills ? `Relevant skills:\n${context.skills}` : "",
     context.rules ? `Rules from AGENTS.md (must be respected):\n${context.rules}` : "",
+    context.images && context.images.length > 0
+      ? `The user attached ${context.images.length} image(s): ${context.images
+          .map((image) => image.label ?? "image")
+          .join(", ")}. Plan for the request including these attachments.`
+      : "",
     "Return the JSON object described in the system prompt.",
   ]
     .filter(Boolean)

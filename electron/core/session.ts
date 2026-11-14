@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  statSync,
   realpathSync,
   renameSync,
   unlinkSync,
@@ -75,7 +76,9 @@ import type { LspFacts } from "./lsp/client";
 import { planWithProvider } from "./agent/llm-planner";
 import { normalizePlan } from "./agent/normalize-plan";
 import type { PlanDraft } from "./agent/plan-types";
+import { clipPreview, logLlm } from "./log/llm-log";
 import { readProjectAgentsMd } from "./rules/agents-md";
+import { createCheckpoint, restoreCheckpoint } from "./agent/checkpoint";
 import {
   ProviderError,
   type ProviderConfig,
@@ -123,6 +126,19 @@ import { runSemanticPass } from "./scan/semantic";
 import { gitState, runProjectChecks, verifyArchitecture } from "./verify/verify";
 import { installMergeDriver, mergeInstructions } from "./git/merge-driver";
 import type { SettingsStore } from "./settings/app-settings";
+import {
+  compactionThreshold,
+  estimateMessagesTokens,
+  clipSummary,
+  shouldCompact,
+  splitForCompaction,
+  summarizeConversation,
+  summaryPrompt,
+  trimConversation,
+  chooseCompaction,
+  type CompactableMessage,
+  type CompactionPolicy,
+} from "./session/compaction";
 
 const CHAT_FILE = "chat.json";
 const MAX_CHAT_MESSAGES = 240;
@@ -299,6 +315,14 @@ export class ProjectSession {
   private stream: ChatStream | null = null;
   private streamTimer: NodeJS.Timeout | null = null;
   private readonly streamId = ulid();
+  /** Handoff summary of compacted older turns, injected into planner prompts. */
+  private conversationSummary = "";
+  /** How many times the conversation has been compacted this session. */
+  private compactionCount = 0;
+  /** Last pre-implementation Git checkpoint (best-effort, may be null). */
+  private lastCheckpoint: { hash: string; versionId: string; createdAt: string } | null = null;
+  /** Images attached to the most recent user turn, forwarded to implementations. */
+  private lastUserImages: import("./agent/provider").ImageAttachment[] = [];
   private closed = false;
   private branch: string | null = null;
   /** Record ids this process just appended; a watcher echo must not look like a pull. */
@@ -714,7 +738,7 @@ export class ProjectSession {
     role: ChatMessage["role"],
     kind: ChatMessage["kind"],
     content: string,
-    extra: Pick<ChatMessage, "proposalId" | "details"> = {},
+    extra: Pick<ChatMessage, "proposalId" | "details" | "images"> = {},
   ): ChatMessage {
     const message: ChatMessage = {
       id: ulid(),
@@ -1177,7 +1201,77 @@ export class ProjectSession {
     return { version, implementation, intent };
   }
 
-  async sendMessage(text: string): Promise<AppState> {
+  /**
+   * Compact older conversation turns. Local trim (deterministic, model-free)
+   * is preferred; an LLM handoff summary is used only when trim alone cannot
+   * fit the local budget, or when the user explicitly chose LLM mode. Failure
+   * never blocks the turn: the planner falls back to the recent-window history.
+   */
+  private async compactConversation(
+    provider: ProviderConfig,
+    policy: CompactionPolicy,
+    mode: "auto" | "trim" | "llm" = "auto",
+  ): Promise<void> {
+    const compactable: CompactableMessage[] = this.messages
+      .filter((message) => message.kind === "text" || message.kind === "proposal")
+      .map((message) => ({ role: message.role, content: message.content }));
+    const { older, recent } = splitForCompaction(compactable, policy.keepTurns);
+    if (older.length === 0) return;
+    const before = estimateMessagesTokens(compactable);
+    const afterTokens = estimateMessagesTokens(recent);
+    // Local trim is deterministic and needs no model; escalate to an LLM
+    // handoff summary only when trimming alone cannot fit the local budget.
+    const localBudget = compactionThreshold(policy);
+    const strategy = chooseCompaction(older, mode, localBudget);
+    if (strategy === "none") return;
+    let summary = "";
+    if (strategy === "trim") {
+      summary = clipSummary(trimConversation(older));
+    } else {
+      try {
+        summary = clipSummary(await summarizeConversation(provider, older, {}));
+      } catch (error) {
+        // An LLM that refuses to compact must not deadlock the turn: fall
+        // back to local trim so the conversation always gets smaller.
+        summary = clipSummary(trimConversation(older));
+        logLlm({
+          event: "error",
+          phase: "compact",
+          provider: provider.kind,
+          model: provider.model,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    this.conversationSummary = summary;
+    this.compactionCount += 1;
+    const olderIds = new Set(older.map((message) => message.content));
+    this.messages = this.messages.filter((message) => {
+      if (!(message.kind === "text" || message.kind === "proposal")) return true;
+      return !olderIds.has(message.content);
+    });
+    this.persistChat();
+    this.addMessage(
+      "system",
+      "text",
+      this.t("session.compacted", {
+        before,
+        after: afterTokens,
+        turns: older.length,
+      }),
+    );
+    logLlm({
+      event: "compact",
+      phase: "compact",
+      provider: provider.kind,
+      model: provider.model,
+      promptTokens: before,
+      completionTokens: afterTokens,
+      responsePreview: clipPreview(`${strategy}: ${summary}`, 300),
+    });
+  }
+
+  async sendMessage(text: string, images: readonly string[] = []): Promise<AppState> {
     const request = text.trim();
     if (!request) return this.getState();
     if (this.proposal?.status === "in_review") {
@@ -1194,14 +1288,38 @@ export class ProjectSession {
     if (!isProviderConfigured(provider)) {
       throw new Error(this.t("error.providerRequired"));
     }
-    const history = this.messages
-      .slice(-12)
+    // Codex-style context management: estimate the conversation size and
+    // compact older turns into a handoff summary before they overflow the
+    // model's window. The summary survives in memory and in the chat cache.
+    const policy: CompactionPolicy = {
+      contextWindow: provider.contextWindow,
+      ratio: provider.compactionRatio,
+      keepTurns: 8,
+    };
+    const compactable: CompactableMessage[] = this.messages
       .filter((message) => message.kind === "text" || message.kind === "proposal")
-      .map((message) => ({
-        role: message.role === "user" ? ("user" as const) : ("assistant" as const),
-        content: message.content.slice(0, 6000),
-      }));
-    this.addMessage("user", "text", request);
+      .map((message) => ({ role: message.role, content: message.content }));
+    if (shouldCompact(compactable, policy)) {
+      await this.compactConversation(
+        provider as ProviderConfig,
+        policy,
+        provider.compactionMode ?? "auto",
+      );
+    }
+    const history = [
+      ...(this.conversationSummary
+        ? [{ role: "user" as const, content: summaryPrompt(this.conversationSummary) }]
+        : []),
+      ...this.messages
+        .slice(-12)
+        .filter((message) => message.kind === "text" || message.kind === "proposal")
+        .map((message) => ({
+          role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+          content: message.content.slice(0, 6000),
+        })),
+    ];
+    this.addMessage("user", "text", request, images.length ? { images: [...images] } : {});
+    this.lastUserImages = this.imagesToDataUrls(images);
     this.agentStatus = { phase: "planning", message: this.t("session.planning") };
     this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
     this.abortController = new AbortController();
@@ -1226,6 +1344,7 @@ export class ProjectSession {
               .map((candidate) => `- ${candidate.path}: ${candidate.reason}`)
               .join("\n"),
           history,
+          images: this.imagesToDataUrls(images),
           signal,
           onUsage: (usage) => this.recordUsage("plan", provider.model, usage),
           onReasoning: (delta) => {
@@ -1766,23 +1885,134 @@ export class ProjectSession {
     return sections.join("\n\n");
   }
 
+  /**
+   * Symbol-aware source context. For each requested path, pull the related LSP
+   * symbols (from `lastLspFacts`) and inject only ~40 lines around each symbol
+   * instead of a blunt head-truncation of the whole file. Falls back to a
+   * head-truncated whole file when the language server reported no symbols for
+   * it. This is how the approved architecture narrows the LLM's context to the
+   * relevant code without the model re-reading the file via tools.
+   */
+  private symbolWindow(
+    path: string,
+    root: string,
+    symbols: ReadonlyArray<{ line?: number; character?: number }>,
+  ): string {
+    let content = "";
+    try {
+      const target = this.safeWritePath(path, root);
+      content = readFileSync(target.absolute, "utf8");
+    } catch {
+      return ""; // missing file (new component) — caller handles it
+    }
+    const withLines = symbols.filter((symbol) => typeof symbol.line === "number");
+    if (withLines.length === 0) {
+      return content.slice(0, 28_000);
+    }
+    // Merge overlapping windows into line ranges so repeated symbols don't
+    // duplicate context.
+    const window = 40;
+    const ranges: Array<[number, number]> = withLines
+      .map((symbol): [number, number] => [
+        Math.max(1, (symbol.line as number) - window),
+        (symbol.line as number) + window,
+      ])
+      .sort((a, b) => a[0] - b[0]);
+    const merged: Array<[number, number]> = [];
+    for (const range of ranges) {
+      const last = merged.length ? merged[merged.length - 1] : null;
+      if (last && range[0] <= last[1] + 4) last[1] = Math.max(last[1], range[1]);
+      else merged.push([range[0], range[1]]);
+    }
+    const lines = content.split(/\r?\n/);
+    const picked: string[] = [];
+    let chars = 0;
+    for (const [from, to] of merged) {
+      const block = lines.slice(from - 1, to).join("\n");
+      picked.push(`// lines ${from}-${Math.min(to, lines.length)}\n${block}`);
+      chars += block.length;
+      if (chars > 28_000) break;
+    }
+    return picked.join("\n\n…\n\n");
+  }
+
+  /** LSP diagnostics for the given files, rendered compactly for the prompt. */
+  private diagnosticsFor(paths: readonly string[]): string {
+    const byPath = new Map<string, import("./lsp/client").LspFactDiagnostic[]>();
+    for (const diagnostic of this.lastLspFacts?.diagnostics ?? []) {
+      const list = byPath.get(diagnostic.path);
+      if (list) list.push(diagnostic);
+      else byPath.set(diagnostic.path, [diagnostic]);
+    }
+    const lines: string[] = [];
+    for (const path of unique(paths)) {
+      for (const diagnostic of byPath.get(path) ?? []) {
+        if (diagnostic.severity === "hint") continue;
+        lines.push(
+          `${diagnostic.path}:${diagnostic.line}:${diagnostic.character} [${diagnostic.severity}] ${diagnostic.source ? `${diagnostic.source}: ` : ""}${diagnostic.message}`,
+        );
+      }
+    }
+    return lines.slice(0, 40).join("\n");
+  }
+
+  /**
+   * Load attached image paths into data URLs for vision models. Strings that
+   * are already data URLs pass through; project-relative paths are read and
+   * base64-encoded. Unknown or oversized files are skipped, never fatal.
+   */
+  private imagesToDataUrls(
+    images: readonly string[],
+  ): import("./agent/provider").ImageAttachment[] {
+    const mimes: Record<string, string> = {
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      gif: "image/gif",
+      webp: "image/webp",
+    };
+    const out: import("./agent/provider").ImageAttachment[] = [];
+    for (const value of images.slice(0, 6)) {
+      if (value.startsWith("data:")) {
+        out.push({ dataUrl: value.slice(0, 4_000_000) });
+        continue;
+      }
+      try {
+        const relative = normalizeProjectPath(value);
+        const absolute = resolve(this.root, relative);
+        if (!existsSync(absolute)) continue;
+        const stat = statSync(absolute);
+        if (!stat.isFile() || stat.size > 4 * 1024 * 1024) continue;
+        const ext = value.toLowerCase().split(".").pop() ?? "";
+        const mime = mimes[ext] ?? "image/png";
+        out.push({
+          dataUrl: `data:${mime};base64,${readFileSync(absolute).toString("base64")}`,
+          label: value,
+        });
+      } catch {
+        // Skip unreadable attachments; the text request still proceeds.
+      }
+    }
+    return out;
+  }
+
   private fileContext(paths: readonly string[], maxChars = 80_000, root = this.root): string {
     const chunks: string[] = [];
     let total = 0;
+    const symbolsByPath = new Map<string, Array<{ line?: number; character?: number }>>();
+    for (const symbol of this.lastLspFacts?.symbols ?? []) {
+      const list = symbolsByPath.get(symbol.path);
+      if (list) list.push(symbol);
+      else symbolsByPath.set(symbol.path, [symbol]);
+    }
     for (const path of unique(paths)) {
       if (total >= maxChars) break;
-      try {
-        const target = this.safeWritePath(path, root);
-        const content = readFileSync(target.absolute, "utf8");
-        const budget = Math.min(28_000, maxChars - total);
-        const slice = content.slice(0, budget);
-        chunks.push(
-          `--- FILE: ${path} ---\n${slice}${content.length > budget ? "\n… truncated …" : ""}`,
-        );
-        total += slice.length;
-      } catch {
-        // Missing files are expected for new components.
-      }
+      const symbols = symbolsByPath.get(path) ?? [];
+      const body = this.symbolWindow(path, root, symbols);
+      if (!body) continue;
+      const slice = body.slice(0, Math.min(28_000, maxChars - total));
+      chunks.push(`--- FILE: ${path} ${symbols.length ? "(symbol windows)" : ""} ---\n${slice}`);
+      total += slice.length;
     }
     return chunks.join("\n\n");
   }
@@ -1840,6 +2070,17 @@ export class ProjectSession {
       versionId: proposal.id,
     };
     this.deps.emit({ type: "agent", status: this.agentStatus, state: this.getState() });
+    // Best-effort Git checkpoint before any edit reaches the project. The
+    // chat exposes it so the user can undo the whole turn afterwards.
+    const checkpoint = await createCheckpoint(this.root, `jin: ${proposal.intent.title}`);
+    if (checkpoint) {
+      this.lastCheckpoint = { hash: checkpoint, versionId: proposal.id, createdAt: nowIso() };
+      logLlm({
+        event: "checkpoint",
+        phase: "checkpoint",
+        responsePreview: checkpoint.slice(0, 12),
+      });
+    }
     try {
       await this.ensureScan(signal);
       const workspace = createImplementationWorkspace(this.root);
@@ -1864,18 +2105,41 @@ export class ProjectSession {
         if (target?.file) wantedPaths.add(target.file);
       }
       for (const candidate of reusePlan.candidates.slice(0, 6)) wantedPaths.add(candidate.path);
+      // Architecture → file fallback: nodes the plan left without an explicit
+      // `file` but that name a symbol or responsibility. Reverse-lookup the
+      // symbol in the LSP index so the context is still narrowed to the right
+      // files; only when nothing resolves do we fall back to grep/glob.
+      const symbolToPath = new Map<string, string>();
+      for (const symbol of this.lastLspFacts?.symbols ?? []) {
+        if (!symbolToPath.has(symbol.name)) symbolToPath.set(symbol.name, symbol.path);
+      }
+      const unresolved: string[] = [];
+      for (const op of proposal.ops) {
+        if (op.op === "edge.add" || op.op === "edge.remove") continue;
+        const node = op.op === "node.add" ? op.node : this.snapshot.nodes[op.id];
+        if (node && !node.file) {
+          const hint = node.symbol || node.name;
+          const path = hint ? symbolToPath.get(hint) : undefined;
+          if (path) wantedPaths.add(path);
+          else if (hint) unresolved.push(hint);
+        }
+      }
       const skills = this.skills.promptFor(`${proposal.intent.title}\n${proposal.intent.goal}`);
       const ekoSystem = `You are Jin's implementation agent running inside Eko. The architecture has already been approved by a human; code must conform to it.
 Rules:
+- Start by writing a todo_write list covering the implementation steps; keep it updated as you work (mark exactly one item in_progress).
 - Use architecture to re-read the approved L0/L1/facet graph and structural ops before editing.
-- Use search_code before writing a new component, hook, service or helper; reuse an existing unit when it fits.
+- Use grep for exact symbol/string/import lookups and glob to discover files; use search_code to find reusable existing implementations before writing new code.
 - Use read_file to inspect current source. Use apply_patch for existing files; every edit is a unified diff and is staged virtually.
 - Keep unified-diff hunk line counts exact. Never use placeholder hunk headers; if apply_patch rejects a patch, regenerate it from the current file contents.
 - Use write_file only for new files or when a patch cannot represent the change.
 - Use delete_file for approved removals. All edits are staged virtually; they are applied atomically after the run.
 - Use run_shell for bounded project checks or inspection. Commands must stay inside the project, time out quickly, and are audited in .jin/cache/shell-audit.jsonl.
+- Use fetch_url to read public documentation when unsure about an API; use web_search only if a search endpoint is configured. Never guess API signatures you can verify.
+- MCP tools may be available with names like mcp__server__tool; prefer them for the capabilities they expose.
 - Never modify .jin/, .git/, node_modules/, dist/, dist-electron/, or release/. The tools reject those paths.
 - Keep the change within approved files or their conventional test companions. Do not add helper files unless they are explicitly present in the approved architecture scope.
+- Before finishing, run run_checks and fix any failing typecheck/test/lint check.
 - Work until the implementation is complete, then finish with a short plain-text summary of what changed.
 - If an approved file cannot be implemented, explain why in the summary instead of inventing unrelated files.`;
       const agentRules = this.agentRules();
@@ -1893,10 +2157,15 @@ Rules:
       if (allowedPaths.size === 0) {
         throw new Error("The approved architecture proposal does not authorize any source paths.");
       }
-      const independentTasks = independentImplementationTasks(proposal.intent.tasks);
-      const assignedTasks: Array<IntentTask | null> = independentTasks
-        ? [...independentTasks]
-        : [null];
+      // 0 = auto: Jin splits only when tasks are genuinely independent (up to
+      // 3 workers); 1 forces a single worker; N caps the parallel sub-agents.
+      const workerCap = settings.agent.maxWorkers;
+      const independent =
+        workerCap <= 1
+          ? []
+          : (independentImplementationTasks(proposal.intent.tasks, workerCap || 3) ?? []);
+      const assignedTasks: Array<IntentTask | null> =
+        independent.length > 1 ? [...independent] : [null];
       const workerInput = (
         task: IntentTask | null,
       ): { text: string; scope: ReadonlySet<string> } => {
@@ -1908,6 +2177,13 @@ Rules:
             ])
           : unique([...wantedPaths]);
         const workerContext = this.fileContext(readPaths, 80_000, workspace);
+        const diagnostics = this.diagnosticsFor(readPaths);
+        const notesForWorker: string[] = [];
+        if (unresolved.length > 0) {
+          notesForWorker.push(
+            `Architecture nodes without a resolved file (locate them with grep/glob): ${unresolved.join(", ")}`,
+          );
+        }
         return {
           text: [
             `Intent:\n${JSON.stringify(workerIntent, null, 2)}`,
@@ -1919,8 +2195,12 @@ Rules:
               : "Implement the approved Intent and all its tasks.",
             skills ? `Skills:\n${skills}` : "",
             workerContext
-              ? `Existing source context:\n${workerContext}`
+              ? `Existing source context (symbol-narrowed):\n${workerContext}`
               : "No existing source files were selected.",
+            ...notesForWorker,
+            diagnostics
+              ? `Pre-existing diagnostics in the target files (fix what is in scope):\n${diagnostics}`
+              : "",
           ]
             .filter(Boolean)
             .join("\n\n"),
@@ -1959,6 +2239,23 @@ Rules:
               ops: proposal.ops,
               reusePlan,
               searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
+              mcpTools: this.mcp.agentTools(),
+              images: this.lastUserImages,
+              webSearch: { endpoint: provider.searchEndpoint, apiKey: provider.searchApiKey },
+              onTodos: (todoSummary, list) => {
+                if (signal.aborted) return;
+                this.agentStatus = {
+                  ...this.agentStatus,
+                  message: `${workerLabel}: ${todoSummary}`,
+                };
+                this.updateStream(ekoContent, {
+                  reasoning: ekoThinking,
+                  label: `${workerLabel}: ${todoSummary}`,
+                  ...(ekoContent ? {} : { phase: "thinking" as const }),
+                });
+                this.pushActivity("todo", todoSummary);
+                void list;
+              },
               onUsage: (usage) => this.recordUsage("eko", provider.model, usage),
               onThinking: (text) => {
                 if (signal.aborted) return;
@@ -2219,11 +2516,65 @@ Rules:
         edits: appliedEdits,
       });
       const languageCheck = this.languageCheck();
+      let projectChecks: ImplementationCheck[] = [];
+      {
+        const initial = await runProjectChecks(workspace);
+        const failing = initial.filter((check) => check.status === "fail");
+        let repairRan = false;
+        // Feedback loop: when the project's own typecheck/test/lint scripts
+        // fail inside the staging workspace, hand the failing output back to
+        // the implementation agent for one bounded repair pass before
+        // anything is written to the real project.
+        if (failing.length > 0 && assignedTasks.length === 1 && !signal.aborted) {
+          this.pushActivity(
+            "repair",
+            `Project checks failed (${failing.map((check) => check.name).join(", ")}); asking the agent to fix them.`,
+          );
+          const repairFeedback = failing
+            .map((check) => `${check.name} failed:\n${check.detail.slice(0, 4_000)}`)
+            .join("\n\n");
+          try {
+            const repair = await runEkoCoder({
+              root: workspace,
+              provider: provider as ProviderConfig,
+              system: systemPrompt,
+              task: `Your previous implementation of the approved architecture failed project checks. Fix the code so every check passes. Keep the change within these approved paths: ${[...allowedPaths].join(", ")}\n\nCheck failures:\n${repairFeedback}`,
+              temperature: settings.agent.temperature,
+              maxTokens: settings.agent.maxTokens,
+              signal,
+              snapshot: this.snapshot,
+              intent: proposal.intent,
+              ops: proposal.ops,
+              reusePlan,
+              searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
+              mcpTools: this.mcp.agentTools(),
+              images: this.lastUserImages,
+              onActivity: (entry) => {
+                if (signal.aborted) return;
+                this.pushActivity(entry.tool, entry.detail, entry.isError);
+              },
+              onUsage: (usage) => this.recordUsage("eko", provider.model, usage),
+            });
+            if (repair.edits.length > 0) {
+              rawEditBatches = [...rawEditBatches, { edits: repair.edits, scope: allowedPaths }];
+            }
+            warnings.push("A repair pass ran after project checks failed.");
+            summary = [summary, repair.summary].filter(Boolean).join("\n");
+            repairRan = true;
+          } catch (repairError) {
+            warnings.push(
+              `Repair pass failed: ${repairError instanceof Error ? repairError.message : String(repairError)}`,
+            );
+          }
+          void repairRan;
+        }
+        projectChecks = await runProjectChecks(workspace);
+      }
       const checks = [
         acceptanceCheck,
         reuseCheck,
         ...(languageCheck ? [languageCheck] : []),
-        ...(await runProjectChecks(workspace)),
+        ...projectChecks,
       ];
       const version = this.snapshot.versions[proposal.id];
       const opRecordIds = proposal.opRecordIds ?? version?.ops ?? [];
@@ -2333,6 +2684,37 @@ Rules:
         }
       }
     }
+  }
+
+  /**
+   * Undo the last implementation turn by restoring the pre-implementation Git
+   * checkpoint into the working tree. HEAD is not moved; the architecture
+   * ledger is not touched. Only offered while no agent is running.
+   */
+  async undoLastImplementation(): Promise<AppState> {
+    if (
+      this.agentStatus.phase === "planning" ||
+      this.agentStatus.phase === "implementing" ||
+      this.agentStatus.phase === "verifying"
+    ) {
+      throw new Error(this.t("error.agentWorking"));
+    }
+    if (!this.lastCheckpoint) {
+      throw new Error(this.t("error.noCheckpoint"));
+    }
+    const result = await restoreCheckpoint(this.root, this.lastCheckpoint.hash);
+    this.addMessage(
+      "system",
+      "text",
+      this.t("session.checkpointRestored", {
+        files: result.restored,
+        hash: this.lastCheckpoint.hash.slice(0, 12),
+      }),
+    );
+    this.lastCheckpoint = null;
+    await this.scan();
+    this.emitState();
+    return this.getState();
   }
 
   async retryImplementation(versionId?: string): Promise<AppState> {

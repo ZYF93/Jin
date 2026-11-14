@@ -88,10 +88,11 @@ interface JinStore {
   scan: () => Promise<void>;
   amendArchitecture: (versionId: string) => Promise<void>;
   mergeIntent: () => Promise<void>;
-  sendMessage: (text: string) => Promise<void>;
+  sendMessage: (text: string, images?: string[]) => Promise<void>;
   approveProposal: (note?: string) => Promise<void>;
   rejectProposal: (note?: string) => Promise<void>;
   retryImplementation: (versionId?: string) => Promise<void>;
+  undoImplementation: () => Promise<void>;
   cancelAgent: () => Promise<void>;
   saveSettings: (patch: SettingsPatch) => Promise<boolean>;
   refreshTools: () => Promise<ToolsInfo | null>;
@@ -411,10 +412,12 @@ export const useJin = create<JinStore>((set, get) => {
       }
     },
 
-    sendMessage: async (text) => {
+    sendMessage: async (text, images) => {
       const request = text.trim();
-      if (!request || get().busy) return;
-      await execute(t("busy.thinking"), () => window.jin.sendMessage(request));
+      if ((!request && !images?.length) || get().busy) return;
+      await execute(t("busy.thinking"), () =>
+        window.jin.sendMessage(request, images?.length ? images : undefined),
+      );
     },
 
     approveProposal: async (note) => {
@@ -468,6 +471,15 @@ export const useJin = create<JinStore>((set, get) => {
       await execute(t("busy.startingImplementation"), () =>
         window.jin.retryImplementation(versionId),
       );
+    },
+
+    undoImplementation: async () => {
+      try {
+        await execute(t("busy.restoring"), () => window.jin.undoImplementation());
+        notify("success", t("toast.checkpointRestored"));
+      } catch (error) {
+        notify("error", errorMessage(error));
+      }
     },
 
     cancelAgent: async () => {

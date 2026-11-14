@@ -43,6 +43,7 @@ import { useT } from "../lib/i18n";
 import { copyText, formatCount } from "../lib/utils";
 import { useJin } from "../state/useJin";
 import { ModelField } from "./ModelField";
+import { presetFor } from "../../shared/model-presets";
 import { Modal, ModalHeader, SectionLabel, Spinner } from "./ui";
 
 const TABS: Array<{ id: SettingsTab; label: MessageKey; icon: typeof Cpu }> = [
@@ -65,6 +66,8 @@ type Draft = {
   compactionRatio: number;
   inputPrice: number;
   outputPrice: number;
+  searchEndpoint: string;
+  customHeaders: string;
   semanticScan: boolean;
   temperature: number;
   maxTokens: number;
@@ -88,6 +91,10 @@ function draftFrom(settings: AppSettings): Draft {
     compactionRatio: settings.provider.compactionRatio ?? 0.8,
     inputPrice: settings.provider.inputPricePerMillion ?? 0,
     outputPrice: settings.provider.outputPricePerMillion ?? 0,
+    searchEndpoint: settings.provider.searchEndpoint ?? "",
+    customHeaders: Object.entries(settings.provider.customHeaders ?? {})
+      .map(([key, value]) => `${key}: ${value}`)
+      .join("\n"),
     semanticScan: settings.agent.semanticScan,
     temperature: settings.agent.temperature,
     maxTokens: settings.agent.maxTokens,
@@ -96,6 +103,16 @@ function draftFrom(settings: AppSettings): Draft {
     updateAutoCheck: settings.updates.autoCheck,
     updateFeedUrl: settings.updates.feedUrl,
   };
+}
+
+/** Parse a `key: value` per-line textarea into a headers record. */
+function parseCustomHeaders(text: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(line.trim());
+    if (match?.[1]) headers[match[1]] = match[2].trim();
+  }
+  return headers;
 }
 
 function updateStatusText(
@@ -509,6 +526,10 @@ function ProviderTab({
   setApiKey,
   clearKey,
   setClearKey,
+  searchApiKey,
+  setSearchApiKey,
+  clearSearchKey,
+  setClearSearchKey,
 }: {
   draft: Draft;
   setDraft: (patch: Partial<Draft>) => void;
@@ -517,8 +538,14 @@ function ProviderTab({
   setApiKey: (value: string) => void;
   clearKey: boolean;
   setClearKey: (value: boolean) => void;
+  searchApiKey: string;
+  setSearchApiKey: (value: string) => void;
+  clearSearchKey: boolean;
+  setClearSearchKey: (value: boolean) => void;
 }) {
   const t = useT();
+  const saveSettings = useJin((state) => state.saveSettings);
+  const [profileName, setProfileName] = useState("");
   const openai = draft.providerKind === "openai-compatible";
   const [models, setModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -622,15 +649,25 @@ function ProviderTab({
               loading={modelsLoading}
               disabled={draft.providerKind === "none"}
               onRefresh={() => void loadModels()}
-              onChange={(next, found) =>
+              onChange={(next, found) => {
+                const preset = presetFor(next);
                 setDraft({
                   model: next,
-                  ...(found?.contextWindow ? { contextWindow: found.contextWindow } : {}),
+                  // Prefer the remote catalog value; fall back to the built-in
+                  // preset when the provider does not advertise it.
+                  contextWindow:
+                    found?.contextWindow ?? preset?.contextWindow ?? draft.contextWindow,
+                  inputPrice:
+                    draft.inputPrice > 0 ? draft.inputPrice : (preset?.inputPricePerMillion ?? 0),
+                  outputPrice:
+                    draft.outputPrice > 0
+                      ? draft.outputPrice
+                      : (preset?.outputPricePerMillion ?? 0),
                   ...(found && !found.reasoningEfforts.includes(draft.reasoningEffort)
                     ? { reasoningEffort: "auto" as ReasoningEffort }
                     : {}),
-                })
-              }
+                });
+              }}
               hint={
                 modelsMessage
                   ? modelsMessage
@@ -738,6 +775,25 @@ function ProviderTab({
           <div className="hint">{t("chat.compactionHint")}</div>
         </div>
 
+        <div className="mt-3">
+          <div className="label">{t("settings.compactionMode")}</div>
+          <div className="segmented w-full">
+            {(["auto", "trim", "llm"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`segment ${
+                  (settings.provider.compactionMode ?? "auto") === mode ? "active" : ""
+                }`}
+                onClick={() => void saveSettings({ providerCompactionMode: mode })}
+              >
+                {t(`settings.compactionMode.${mode}` as MessageKey)}
+              </button>
+            ))}
+          </div>
+          <div className="hint mt-1">{t("settings.compactionModeHint")}</div>
+        </div>
+
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <div>
             <div className="label">{t("settings.inputPrice")}</div>
@@ -771,6 +827,134 @@ function ProviderTab({
           </div>
         </div>
         <div className="hint mt-1">{t("settings.priceHint")}</div>
+
+        <div className="mt-3">
+          <div className="label">{t("settings.savedProviders")}</div>
+          {settings.providerProfiles.length === 0 ? (
+            <div className="hint">{t("settings.savedProvidersEmpty")}</div>
+          ) : (
+            <div className="mt-1.5 space-y-1.5">
+              {settings.providerProfiles.map((profile) => (
+                <div
+                  key={profile.id}
+                  className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--panel)]/70 px-2.5 py-1.5"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[9.5px] font-semibold text-[var(--text)]">
+                      {profile.name}
+                    </div>
+                    <div className="truncate font-mono-ui text-[8px] text-[var(--faint)]">
+                      {profile.kind} · {profile.model}
+                      {profile.hasApiKey ? " · " + t("settings.stored") : ""}
+                    </div>
+                  </div>
+                  <button
+                    className="btn h-6 px-2 text-[8.5px]"
+                    onClick={() =>
+                      setDraft({
+                        providerKind: profile.kind,
+                        baseUrl: profile.baseUrl,
+                        model: profile.model,
+                        reasoningEffort: profile.reasoningEffort,
+                        ...(profile.contextWindow ? { contextWindow: profile.contextWindow } : {}),
+                      })
+                    }
+                    title={t("settings.applyProfile")}
+                  >
+                    <Plug size={10} />
+                    {t("settings.apply")}
+                  </button>
+                  <button
+                    className="btn h-6 px-1.5 text-[8.5px] text-[var(--faint)] hover:text-[var(--danger)]"
+                    onClick={() => void saveSettings({ deleteProviderProfileId: profile.id })}
+                    title={t("settings.deleteProfile")}
+                  >
+                    <Trash2 size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-2 flex gap-2">
+            <input
+              className="field h-7 text-[9px]"
+              value={profileName}
+              onChange={(event) => setProfileName(event.target.value)}
+              placeholder={t("settings.profilePlaceholder")}
+            />
+            <button
+              className="btn h-7 px-2.5 text-[8.5px]"
+              onClick={() =>
+                void saveSettings({
+                  saveProviderProfile: { name: profileName.trim() || "Provider" },
+                })
+              }
+              disabled={draft.providerKind === "none"}
+              title={t("settings.saveProfileHint")}
+            >
+              <GitMerge size={10} />
+              {t("settings.saveProfile")}
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <div className="label">{t("settings.searchEndpoint")}</div>
+          <input
+            className="field font-mono-ui"
+            value={draft.searchEndpoint}
+            onChange={(event) => setDraft({ searchEndpoint: event.target.value })}
+            placeholder="https://api.brave.com/res/v1/web/search"
+            disabled={draft.providerKind === "none"}
+          />
+          <div className="hint mt-1 flex items-center gap-1.5">
+            <Search size={9} />
+            {t("settings.searchEndpointHint")}
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <input
+              className="field font-mono-ui"
+              type="password"
+              value={searchApiKey}
+              onChange={(event) => {
+                setSearchApiKey(event.target.value);
+                if (event.target.value) setClearSearchKey(false);
+              }}
+              placeholder={
+                settings.provider.hasSearchApiKey
+                  ? t("settings.storedKeyPlaceholder")
+                  : t("settings.searchKeyPlaceholder")
+              }
+              autoComplete="off"
+            />
+            {settings.provider.hasSearchApiKey ? (
+              <button
+                className={`btn h-[34px] px-2 ${clearSearchKey ? "btn-danger" : ""}`}
+                onClick={() => {
+                  setClearSearchKey(!clearSearchKey);
+                  setSearchApiKey("");
+                }}
+                title={t("settings.deleteKeyTitle")}
+              >
+                <Trash2 size={12} />
+                {clearSearchKey ? t("settings.willDelete") : t("settings.clear")}
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <div className="label">{t("settings.customHeaders")}</div>
+          <textarea
+            className="field h-16 resize-y font-mono-ui text-[9.5px]"
+            value={draft.customHeaders}
+            onChange={(event) => setDraft({ customHeaders: event.target.value })}
+            placeholder={"X-Organization: org-id\nX-Project: proj-id"}
+            spellCheck={false}
+            disabled={draft.providerKind === "none"}
+          />
+          <div className="hint mt-1">{t("settings.customHeadersHint")}</div>
+        </div>
 
         {openai ? (
           <div className="mt-3">
@@ -1500,6 +1684,8 @@ export function SettingsDialog() {
   const [draft, setDraftState] = useState<Draft | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [clearKey, setClearKey] = useState(false);
+  const [searchApiKey, setSearchApiKey] = useState("");
+  const [clearSearchKey, setClearSearchKey] = useState(false);
   const [validation, setValidation] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1507,6 +1693,8 @@ export function SettingsDialog() {
     setDraftState(draftFrom(settings));
     setApiKey("");
     setClearKey(false);
+    setSearchApiKey("");
+    setClearSearchKey(false);
     setValidation(null);
     // Reset only when the dialog opens; background state updates must not clobber edits.
   }, [open]);
@@ -1542,6 +1730,8 @@ export function SettingsDialog() {
       providerCompactionRatio: draft.compactionRatio,
       providerInputPrice: draft.inputPrice,
       providerOutputPrice: draft.outputPrice,
+      providerSearchEndpoint: draft.searchEndpoint.trim(),
+      providerCustomHeaders: parseCustomHeaders(draft.customHeaders),
       semanticScan: draft.semanticScan,
       temperature: draft.temperature,
       maxTokens: draft.maxTokens,
@@ -1552,6 +1742,8 @@ export function SettingsDialog() {
     };
     if (apiKey.trim()) patch.apiKey = apiKey.trim();
     else if (clearKey) patch.apiKey = null;
+    if (searchApiKey.trim()) patch.searchApiKey = searchApiKey.trim();
+    else if (clearSearchKey) patch.searchApiKey = null;
     const ok = await saveSettings(patch);
     if (ok) setOpen(false);
   };
@@ -1616,6 +1808,10 @@ export function SettingsDialog() {
                 setApiKey={setApiKey}
                 clearKey={clearKey}
                 setClearKey={setClearKey}
+                searchApiKey={searchApiKey}
+                setSearchApiKey={setSearchApiKey}
+                clearSearchKey={clearSearchKey}
+                setClearSearchKey={setClearSearchKey}
               />
             </>
           ) : tab === "team" ? (

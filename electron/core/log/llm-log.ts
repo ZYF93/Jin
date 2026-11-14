@@ -12,7 +12,7 @@ import { join } from "node:path";
  * not break a model call.
  */
 
-export type LlmLogEvent = "request" | "response" | "error" | "http";
+export type LlmLogEvent = "request" | "response" | "error" | "http" | "compact" | "checkpoint";
 
 /** Chunk-level counters collected while consuming one streaming response. */
 export interface LlmStreamStats {

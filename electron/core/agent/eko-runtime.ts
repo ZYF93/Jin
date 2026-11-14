@@ -7,6 +7,11 @@ import { normalizeProjectPath } from "./path-safety";
 import type { ProviderConfig } from "./provider";
 import { resilientProviderFetch } from "./provider";
 import { runShell, shellResultText } from "./shell";
+import { runProjectChecks } from "../verify/verify";
+import { grepFiles, globFiles } from "./code-search";
+import { TodoList } from "./todo";
+import { fetchPage, searchWeb } from "./web";
+import { runHooks } from "./hooks";
 
 export { normalizeProjectPath } from "./path-safety";
 
@@ -204,6 +209,14 @@ function toolResult(
 
 export type EkoModule = typeof import("@eko-ai/eko");
 
+export interface EkoMcpTool {
+  /** Namespaced tool name: `mcp__server__tool`. */
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  call: (args: Record<string, unknown>) => Promise<string>;
+}
+
 export interface EkoCoderInput {
   root: string;
   provider: ProviderConfig;
@@ -217,6 +230,12 @@ export interface EkoCoderInput {
   ops: ArchOp[];
   reusePlan: ReusePlan | null;
   searchCode: (query: string, limit?: number) => ReuseCandidate[];
+  /** MCP tools exposed to the agent, in addition to Jin's built-ins. */
+  mcpTools?: readonly EkoMcpTool[];
+  /** Optional configured search endpoint for the web_search tool. */
+  webSearch?: { endpoint?: string; apiKey?: string | null };
+  /** Images the user attached, forwarded to the implementation model via the OpenAI layer. */
+  images?: readonly import("./provider").ImageAttachment[];
   onProgress?: (message: string) => void;
   /** Cumulative assistant text from Eko, forwarded as a transient chat stream. */
   onText?: (text: string, done: boolean) => void;
@@ -224,6 +243,8 @@ export interface EkoCoderInput {
   onThinking?: (text: string, done: boolean) => void;
   /** One visible tool call / result / error row for the chat activity feed. */
   onActivity?: (entry: { tool: string; detail: string; isError?: boolean }) => void;
+  /** Todo list snapshot, emitted whenever the agent rewrites it. */
+  onTodos?: (summary: string, list: string) => void;
   /** Per-LLM-call token telemetry from Eko's stream finish events. */
   onUsage?: (usage: { promptTokens: number; completionTokens: number }) => void;
 }
@@ -233,10 +254,50 @@ export interface EkoCoderResult {
   summary: string;
   notes: string[];
   warnings: string[];
+  todos: string[];
 }
 
 export interface EkoCoderDeps {
   load?: () => Promise<EkoModule>;
+}
+
+/**
+ * Wrap a fetch so the first OpenAI `user` message in every request carries the
+ * attached images as `image_url` parts. Eko drives its LLM through the OpenAI
+ * protocol, so this is how vision reaches the implementation model without
+ * touching Eko's internal message plumbing.
+ */
+export function withImageFetch(
+  base: typeof fetch,
+  images: readonly import("./provider").ImageAttachment[],
+): typeof fetch {
+  if (images.length === 0) return base;
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    let body = init?.body;
+    if (body && typeof body === "string") {
+      try {
+        const parsed = JSON.parse(body) as {
+          messages?: Array<{ role?: string; content?: unknown }>;
+        };
+        const user = Array.isArray(parsed.messages)
+          ? parsed.messages.find((message) => message.role === "user")
+          : undefined;
+        if (user && typeof user.content === "string") {
+          user.content = [
+            ...(user.content ? [{ type: "text", text: user.content }] : []),
+            ...images.map((image) => ({
+              type: "image_url",
+              image_url: { url: image.dataUrl },
+            })),
+          ];
+        }
+        body = JSON.stringify(parsed);
+      } catch {
+        // Leave the body untouched if it is not the expected shape.
+      }
+    }
+    return base(input, body !== undefined ? { ...init, body } : init);
+  }) as typeof fetch;
 }
 
 export function ekoLlmConfig(input: EkoCoderInput): {
@@ -328,11 +389,190 @@ export async function runEkoCoder(
 
   const workspace = new StagedWorkspace(input.root);
   const warnings: string[] = [];
+  const todos = new TodoList();
   const architecture = architectureSummary(input.snapshot, input.intent);
   const reuse = input.reusePlan
     ? JSON.stringify(input.reusePlan, null, 2)
     : "No ReusePlan was built for this version.";
-  const tools: import("@eko-ai/eko").Tool[] = [
+
+  /**
+   * Wrap a tool so configured `.jin/hooks.json` rules run around it. Pre-tool
+   * hooks can veto the call; post-tool hooks are audit-only.
+   */
+  const builtins: import("@eko-ai/eko").Tool[] = [
+    {
+      name: "grep",
+      description:
+        "Search source files with a regular expression. Returns file:line matches. Use for exact symbol, string or import lookups; prefer this over search_code when you know what text to find.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "JavaScript regular expression." },
+          path: {
+            type: "string",
+            description: "Optional project-relative sub-directory to search.",
+          },
+          glob: { type: "string", description: "Optional file filter, e.g. *.ts or src/**/*.tsx." },
+          ignoreCase: { type: "boolean", description: "Case-insensitive search." },
+          limit: { type: "number", description: "Maximum matches, 1-500 (default 80)." },
+        },
+        required: ["pattern"],
+      },
+      supportParallelCalls: true,
+      execute: async (args) => {
+        const pattern = typeof args.pattern === "string" ? args.pattern : "";
+        if (!pattern) return toolResult("Error: pattern is required", true);
+        try {
+          const result = grepFiles(input.root, pattern, {
+            path: typeof args.path === "string" ? args.path : undefined,
+            glob: typeof args.glob === "string" ? args.glob : undefined,
+            ignoreCase: args.ignoreCase === true,
+            limit: typeof args.limit === "number" ? args.limit : undefined,
+            signal: input.signal,
+          });
+          if (result.hits.length === 0) {
+            return toolResult(`No matches in ${result.filesScanned} files.`);
+          }
+          const body = result.hits.map((hit) => `${hit.path}:${hit.line}: ${hit.text}`).join("\n");
+          return toolResult(`${body}${result.truncated ? "\n… [results truncated]" : ""}`);
+        } catch (error) {
+          return toolResult(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+            true,
+          );
+        }
+      },
+    },
+    {
+      name: "glob",
+      description:
+        "List project files matching a glob pattern such as src/**/*.ts. Use to discover files before reading them.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Glob pattern, e.g. src/**/*.ts." },
+          limit: { type: "number", description: "Maximum paths, 1-1000 (default 200)." },
+        },
+        required: ["pattern"],
+      },
+      supportParallelCalls: true,
+      execute: async (args) => {
+        const pattern = typeof args.pattern === "string" ? args.pattern : "";
+        if (!pattern) return toolResult("Error: pattern is required", true);
+        const result = globFiles(
+          input.root,
+          pattern,
+          typeof args.limit === "number" ? args.limit : 200,
+        );
+        if (result.paths.length === 0) return toolResult("No files matched.");
+        return toolResult(`${result.paths.join("\n")}${result.truncated ? "\n… [truncated]" : ""}`);
+      },
+    },
+    {
+      name: "todo_write",
+      description:
+        "Create or replace the task list for this implementation. Rewrite the whole list each call: mark exactly one item in_progress, completed items stay completed. Use it for any multi-step task so the user sees progress.",
+      parameters: {
+        type: "object",
+        properties: {
+          todos: {
+            type: "array",
+            description: "Full list, in order.",
+            items: {
+              type: "object",
+              properties: {
+                content: { type: "string", description: "Short imperative task." },
+                status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+              },
+              required: ["content", "status"],
+            },
+          },
+        },
+        required: ["todos"],
+      },
+      execute: async (args) => {
+        const text = todos.write(args.todos);
+        input.onTodos?.(todos.summary(), text);
+        input.onProgress?.(`todo: ${todos.summary()}`);
+        return toolResult(text);
+      },
+    },
+    {
+      name: "todo_read",
+      description: "Read the current task list.",
+      parameters: { type: "object", properties: {} },
+      supportParallelCalls: true,
+      execute: async () => toolResult(todos.read()),
+    },
+    {
+      name: "fetch_url",
+      description:
+        "Fetch a public http(s) page and return readable text (HTML stripped). Use to read documentation, changelogs or API references. Private and local addresses are rejected.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Absolute http(s) URL." },
+          maxChars: { type: "number", description: "Maximum characters to return (500-60000)." },
+        },
+        required: ["url"],
+      },
+      execute: async (args) => {
+        const url = typeof args.url === "string" ? args.url : "";
+        if (!url) return toolResult("Error: url is required", true);
+        try {
+          const page = await fetchPage(url, {
+            maxChars: typeof args.maxChars === "number" ? args.maxChars : undefined,
+            signal: input.signal,
+          });
+          const title = page.title ? `# ${page.title}\n\n` : "";
+          return toolResult(`${title}${page.text}${page.truncated ? "\n… [truncated]" : ""}`);
+        } catch (error) {
+          return toolResult(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+            true,
+          );
+        }
+      },
+    },
+    {
+      name: "web_search",
+      description:
+        "Search the web through the endpoint configured in Settings → Provider. Returns titles, URLs and snippets; follow up with fetch_url for details.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query." },
+          limit: { type: "number", description: "Maximum results, 1-20 (default 6)." },
+        },
+        required: ["query"],
+      },
+      execute: async (args) => {
+        const query = typeof args.query === "string" ? args.query : "";
+        if (!query.trim()) return toolResult("Error: query is required", true);
+        try {
+          const hits = await searchWeb(query, {
+            endpoint: input.webSearch?.endpoint,
+            apiKey: input.webSearch?.apiKey,
+            limit: typeof args.limit === "number" ? args.limit : undefined,
+            signal: input.signal,
+          });
+          if (hits.length === 0) return toolResult("No results.");
+          return toolResult(
+            hits
+              .map(
+                (hit) =>
+                  `${hit.title}\n${hit.url}${hit.snippet ? `\n${clip(hit.snippet, 400)}` : ""}`,
+              )
+              .join("\n\n"),
+          );
+        } catch (error) {
+          return toolResult(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+            true,
+          );
+        }
+      },
+    },
     {
       name: "read_file",
       description: "Read a UTF-8 source file relative to the project root.",
@@ -538,6 +778,79 @@ export async function runEkoCoder(
       },
     },
     {
+      name: "run_checks",
+      description:
+        "Run the project's own typecheck/test/lint scripts and report each result with its failing output. Call it to verify your implementation before finishing; fix any failing check.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        try {
+          const checks = await runProjectChecks(input.root);
+          if (checks.length === 0) return toolResult("No project checks to run.");
+          const lines = checks.map((check) => {
+            const detail = check.detail.slice(0, 2_000);
+            return `[${check.status.toUpperCase()}] ${check.name}${detail ? `:\n${detail}` : ""}`;
+          });
+          const failed = checks.filter((check) => check.status === "fail").length;
+          return toolResult(
+            `${checks.length - failed}/${checks.length} checks passed.\n\n${lines.join("\n\n")}`,
+            failed > 0,
+          );
+        } catch (error) {
+          return toolResult(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+            true,
+          );
+        }
+      },
+    },
+    {
+      name: "view_image",
+      description:
+        "Load an image file (png/jpg/gif/webp) from the project and return it to the model as a data URL so it can be seen when the provider supports vision. Returns the data URL plus dimensions and byte size. Non-vision models will simply not perceive it.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Project-relative image file path." },
+        },
+        required: ["path"],
+      },
+      supportParallelCalls: true,
+      async execute(args) {
+        const path = typeof args.path === "string" ? args.path : "";
+        if (!path) return toolResult("Error: path is required", true);
+        try {
+          const relative = normalizeProjectPath(path);
+          const absolute = resolve(input.root, relative);
+          if (!existsSync(absolute)) return toolResult(`No such image: ${path}`, true);
+          const stat = statSync(absolute);
+          if (!stat.isFile()) return toolResult(`${path} is not a file`, true);
+          if (stat.size > 4 * 1024 * 1024) return toolResult("Image is larger than 4 MB", true);
+          const mime =
+            (
+              {
+                png: "image/png",
+                jpg: "image/jpeg",
+                jpeg: "image/jpeg",
+                gif: "image/gif",
+                webp: "image/webp",
+                bmp: "image/bmp",
+              } as const
+            )[absolute.split(".").pop()?.toLowerCase() ?? ""] ?? "application/octet-stream";
+          const base64 = readFileSync(absolute).toString("base64");
+          return toolResult(
+            [`Loaded ${path} (${stat.size} bytes, ${mime}).`, `data:${mime};base64,${base64}`].join(
+              "\n",
+            ),
+          );
+        } catch (error) {
+          return toolResult(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+            true,
+          );
+        }
+      },
+    },
+    {
       name: "architecture",
       description:
         "Read the approved L0/L1/facet architecture plus the current intent, structural ops and ReusePlan.",
@@ -557,12 +870,61 @@ export async function runEkoCoder(
     },
   ];
 
+  const mcpTools: import("@eko-ai/eko").Tool[] = (input.mcpTools ?? []).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters as import("@eko-ai/eko").Tool["parameters"],
+    supportParallelCalls: true,
+    execute: async (args: Record<string, unknown>) => {
+      try {
+        return toolResult(await tool.call(args));
+      } catch (error) {
+        return toolResult(`Error: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  }));
+
+  // Every tool runs the project's hooks; pre-tool hooks can veto a call.
+  const tools: import("@eko-ai/eko").Tool[] = [...builtins, ...mcpTools].map((tool) => ({
+    ...tool,
+    execute: async (args: Record<string, unknown>) => {
+      if (input.signal.aborted) return toolResult("Error: cancelled", true);
+      const pre = await runHooks({
+        root: input.root,
+        event: "preToolUse",
+        tool: tool.name,
+        args,
+        signal: input.signal,
+      });
+      if (pre.blocked) return toolResult(`Error: ${pre.message}`, true);
+      const result = await tool.execute?.(args, undefined as never, undefined as never);
+      if (result === undefined) return toolResult("Error: tool produced no result", true);
+      const post = await runHooks({
+        root: input.root,
+        event: "postToolUse",
+        tool: tool.name,
+        args,
+        signal: input.signal,
+      });
+      if (post.ran.length > 0) input.onProgress?.(`hook: ${tool.name}`);
+      return result;
+    },
+  }));
+
   const moduleConfig = module.config;
   if (!configuredEkoModules.has(module)) {
     moduleConfig.maxReactNum = MAX_EKO_STEPS;
     configuredEkoModules.add(module);
   }
   const system = input.system;
+  // Project hooks get a chance to prepare or veto the implementation.
+  const beforeImplement = await runHooks({
+    root: input.root,
+    event: "beforeImplement",
+    signal: input.signal,
+    timeoutMs: 30_000,
+  });
+  if (beforeImplement.blocked) throw new Error(beforeImplement.message);
   class JinAgent extends module.Agent {
     protected async extSysPrompt(): Promise<string> {
       return system;
@@ -583,7 +945,12 @@ export async function runEkoCoder(
     task: input.task,
   });
   const eko = new module.Eko({
-    llms: { default: ekoLlmConfig(input) },
+    llms: {
+      default: {
+        ...ekoLlmConfig(input),
+        fetch: withImageFetch(resilientProviderFetch, input.images ?? []),
+      },
+    },
     agents: [agent],
     callback: {
       async onMessage(message) {
@@ -654,6 +1021,7 @@ export async function runEkoCoder(
           result.result.trim() || `${edits.length} file${edits.length === 1 ? "" : "s"} staged.`,
         notes: [],
         warnings,
+        todos: todos.read().startsWith("No todos") ? [] : todos.read().split("\n"),
       };
     } finally {
       input.signal.removeEventListener("abort", onAbort);

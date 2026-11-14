@@ -125,6 +125,8 @@ export interface PlannerContext {
   onReasoning?: (delta: string) => void;
   /** AGENTS.md rules (project + global), injected into the planning prompt. */
   rules?: string;
+  /** Images the user attached to this request (data URLs); forwarded when the model is vision-capable. */
+  images?: readonly import("./provider").ImageAttachment[];
   signal?: AbortSignal;
 }
 

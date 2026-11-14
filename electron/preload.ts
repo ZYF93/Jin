@@ -37,8 +37,8 @@ const bridge: JinBridge = {
   amendArchitecture: (versionId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.amendArchitecture, versionId) as Promise<AppState>,
   mergeIntent: () => ipcRenderer.invoke(IPC_CHANNELS.mergeIntent) as Promise<AppState>,
-  sendMessage: (text: string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.sendMessage, text) as Promise<AppState>,
+  sendMessage: (text: string, images?: string[]) =>
+    ipcRenderer.invoke(IPC_CHANNELS.sendMessage, text, images) as Promise<AppState>,
   approveProposal: (id: string, note?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.approveProposal, id, note) as Promise<AppState>,
   rejectProposal: (id: string, note?: string) =>
@@ -83,6 +83,8 @@ const bridge: JinBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.listModels, request) as Promise<ProviderModelCatalog>,
   mcpCall: (server: string, tool: string, args?: Record<string, unknown>) =>
     ipcRenderer.invoke(IPC_CHANNELS.mcpCall, server, tool, args) as Promise<McpCallResult>,
+  undoImplementation: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.undoImplementation) as Promise<AppState>,
   gitStatus: () => ipcRenderer.invoke(IPC_CHANNELS.gitStatus) as Promise<GitStatus>,
   gitBranches: () => ipcRenderer.invoke(IPC_CHANNELS.gitBranches) as Promise<GitBranchList>,
   gitCheckout: (name: string, create?: boolean, dirtyAction?: "carry" | "stash") =>

@@ -37,9 +37,7 @@ export function verifyArchitecture(input: VerifyInput): {
 } {
   const observed = observedLevelNodes(input.scan);
   const observedFiles = new Map(
-    input.scan.nodes
-      .filter((node) => node.file)
-      .map((node) => [node.file, node]),
+    input.scan.nodes.filter((node) => node.file).map((node) => [node.file, node]),
   );
   const results: ConformanceResult[] = [];
   const pushOp = (result: Omit<ConformanceResult, "kind">): void => {
@@ -67,7 +65,9 @@ export function verifyArchitecture(input: VerifyInput): {
         status: where ? "pass" : "fail",
         evidence: where
           ? [`Observed ${node.level} ${node.name} at ${where || node.path}`]
-          : [`Not observed in a fresh scan: ${node.level} ${node.name} (${node.path || node.file || "no path"})`],
+          : [
+              `Not observed in a fresh scan: ${node.level} ${node.name} (${node.path || node.file || "no path"})`,
+            ],
       });
       return;
     }
@@ -87,7 +87,8 @@ export function verifyArchitecture(input: VerifyInput): {
     }
     if (op.op === "node.remove") {
       const node = input.snapshot.nodes[op.id];
-      const stillObserved = observed.has(op.id) || Boolean(node?.file && observedFiles.has(node.file));
+      const stillObserved =
+        observed.has(op.id) || Boolean(node?.file && observedFiles.has(node.file));
       pushOp({
         opId,
         status: stillObserved ? "fail" : "pass",
@@ -113,7 +114,9 @@ export function verifyArchitecture(input: VerifyInput): {
           (node.level === "L0" || node.level === "L1") &&
           node.kind !== "external" &&
           node.kind !== "system" &&
-          (node.metadata.scanned === true || node.metadata.origin === "scan" || node.level === "L1"),
+          (node.metadata.scanned === true ||
+            node.metadata.origin === "scan" ||
+            node.level === "L1"),
       )
       .map((node) => node.id),
   );
@@ -173,10 +176,7 @@ function runScript(
   script: string,
   timeoutMs = 180_000,
 ): Promise<ImplementationCheck> {
-  const args =
-    manager === "yarn" || manager === "bun"
-      ? ["run", script]
-      : ["run", script];
+  const args = manager === "yarn" || manager === "bun" ? ["run", script] : ["run", script];
   const command = process.platform === "win32" ? `${manager}.cmd` : manager;
   return new Promise((resolve) => {
     const child = execFile(
@@ -241,7 +241,9 @@ export async function runProjectChecks(root: string): Promise<ImplementationChec
     ];
   }
   const scripts = pkg.scripts ?? {};
-  const selected = ["typecheck", "test", "lint"].filter((script) => typeof scripts[script] === "string");
+  const selected = ["typecheck", "test", "lint"].filter(
+    (script) => typeof scripts[script] === "string",
+  );
   if (selected.length === 0) {
     return [
       {
@@ -257,6 +259,19 @@ export async function runProjectChecks(root: string): Promise<ImplementationChec
     checks.push(await runScript(root, manager, script));
   }
   return checks;
+}
+
+export async function runScriptCheck(
+  root: string,
+  manager: string,
+  script: string,
+  timeoutMs = 180_000,
+): Promise<ImplementationCheck> {
+  return runScript(root, manager, script, timeoutMs);
+}
+
+export function packageManagerFor(root: string): string {
+  return packageManager(root);
 }
 
 export function gitState(root: string): { commit: string; files: string[] } {

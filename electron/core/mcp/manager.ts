@@ -68,11 +68,36 @@ function toolNames(result: unknown): string[] {
   if (!Array.isArray(tools)) return [];
   return tools
     .map((tool) =>
-      typeof tool === "object" && tool !== null && typeof (tool as { name?: unknown }).name === "string"
+      typeof tool === "object" &&
+      tool !== null &&
+      typeof (tool as { name?: unknown }).name === "string"
         ? (tool as { name: string }).name
         : "",
     )
     .filter(Boolean);
+}
+
+/** Extract per-tool description + JSON schema from a tools/list payload. */
+export function toolMetadata(
+  result: unknown,
+): Map<string, { description: string; inputSchema: Record<string, unknown> }> {
+  const meta = new Map<string, { description: string; inputSchema: Record<string, unknown> }>();
+  if (typeof result !== "object" || result === null) return meta;
+  const tools = (result as { tools?: unknown }).tools;
+  if (!Array.isArray(tools)) return meta;
+  for (const tool of tools) {
+    if (typeof tool !== "object" || tool === null) continue;
+    const record = tool as Record<string, unknown>;
+    if (typeof record.name !== "string" || !record.name) continue;
+    meta.set(record.name, {
+      description: typeof record.description === "string" ? record.description : "",
+      inputSchema:
+        typeof record.inputSchema === "object" && record.inputSchema !== null
+          ? (record.inputSchema as Record<string, unknown>)
+          : { type: "object", properties: {} },
+    });
+  }
+  return meta;
 }
 
 function parseStdioResponse(line: string): JsonRpcResponse | null {
@@ -114,7 +139,11 @@ async function stdioRequest(
       else resolve(result);
     };
     const timer = setTimeout(() => {
-      finish(new Error(`MCP ${method} timed out after ${timeoutMs}ms${stderr ? `: ${stderr.slice(-300)}` : ""}`));
+      finish(
+        new Error(
+          `MCP ${method} timed out after ${timeoutMs}ms${stderr ? `: ${stderr.slice(-300)}` : ""}`,
+        ),
+      );
     }, timeoutMs);
     const send = (value: unknown): void => {
       try {
@@ -160,7 +189,9 @@ async function stdioRequest(
     child.on("exit", (code) => {
       if (!settled) {
         finish(
-          new Error(`MCP server exited before ${method}${code === null ? "" : ` (code ${code})`}${stderr ? `: ${stderr.slice(-300)}` : ""}`),
+          new Error(
+            `MCP server exited before ${method}${code === null ? "" : ` (code ${code})`}${stderr ? `: ${stderr.slice(-300)}` : ""}`,
+          ),
         );
       }
     });
@@ -177,12 +208,12 @@ async function stdioRequest(
   });
 }
 
-async function stdioTools(
+async function stdioToolsRaw(
   root: string,
   config: McpServerConfig,
   timeoutMs = 6000,
-): Promise<string[]> {
-  return toolNames(await stdioRequest(root, config, "tools/list", {}, timeoutMs));
+): Promise<unknown> {
+  return stdioRequest(root, config, "tools/list", {}, timeoutMs);
 }
 
 function eventStreamData(body: string): string[] {
@@ -254,11 +285,8 @@ async function remoteRequest(
   }
 }
 
-async function remoteTools(
-  config: McpServerConfig,
-  timeoutMs = 8000,
-): Promise<string[]> {
-  return toolNames(await remoteRequest(config, "tools/list", {}, timeoutMs));
+async function remoteToolsRaw(config: McpServerConfig, timeoutMs = 8000): Promise<unknown> {
+  return remoteRequest(config, "tools/list", {}, timeoutMs);
 }
 
 /**
@@ -269,6 +297,11 @@ async function remoteTools(
 export class McpManager {
   private readonly root: string;
   private cache: McpServerInfo[] = [];
+  /** Description + input schema per `server\u0000tool`, from tools/list. */
+  private toolMeta = new Map<
+    string,
+    { description: string; inputSchema: Record<string, unknown> }
+  >();
 
   constructor(root: string) {
     this.root = root;
@@ -309,10 +342,14 @@ export class McpManager {
         continue;
       }
       try {
-        const tools =
+        const rawTools =
           base.transport === "stdio"
-            ? await stdioTools(this.root, server)
-            : await remoteTools(server);
+            ? await stdioToolsRaw(this.root, server)
+            : await remoteToolsRaw(server);
+        const tools = toolNames(rawTools);
+        for (const [toolName, meta] of toolMetadata(rawTools)) {
+          this.toolMeta.set(`${name}\u0000${toolName}`, meta);
+        }
         results.push({ ...base, status: "ready", tools });
         audit(this.root, { server: name, action: "tools/list", tools });
       } catch (error) {
@@ -393,4 +430,62 @@ export class McpManager {
       throw error;
     }
   }
+
+  /**
+   * MCP tools as first-class agent tools, namespaced `mcp__server__tool`.
+   * Descriptions and input schemas come from `tools/list`; a server in error
+   * or disabled state contributes no tools. The returned call helpers audit
+   * through `call()` and serialize MCP results to plain text for the model.
+   */
+  agentTools(): Array<{
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    call: (args: Record<string, unknown>) => Promise<string>;
+  }> {
+    const tools: Array<{
+      name: string;
+      description: string;
+      parameters: Record<string, unknown>;
+      call: (args: Record<string, unknown>) => Promise<string>;
+    }> = [];
+    for (const server of this.cache) {
+      if (server.status !== "ready") continue;
+      for (const toolName of server.tools) {
+        const meta = this.toolMeta.get(`${server.name}\u0000${toolName}`);
+        tools.push({
+          name: `mcp__${server.name}__${toolName}`,
+          description:
+            meta?.description?.slice(0, 800) || `MCP tool ${toolName} from server ${server.name}.`,
+          parameters: meta?.inputSchema ?? { type: "object", properties: {} },
+          call: async (args: Record<string, unknown>) => {
+            const result = await this.call(server.name, toolName, args);
+            return mcpResultText(result);
+          },
+        });
+      }
+    }
+    return tools;
+  }
+}
+
+/** Serialize an MCP call result into model-readable text. */
+function mcpResultText(result: McpCallResult): string {
+  if (result.isError) {
+    const detail = JSON.stringify(result.content).slice(0, 600);
+    return `Error: ${detail}`;
+  }
+  const content = result.content;
+  if (Array.isArray(content)) {
+    const text = content
+      .map((part) =>
+        typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text"
+          ? (((part as { text?: unknown }).text as string | undefined) ?? "")
+          : "",
+      )
+      .filter(Boolean)
+      .join("\n");
+    return text || JSON.stringify(content).slice(0, 2_000);
+  }
+  return JSON.stringify(content, null, 2).slice(0, 4_000);
 }

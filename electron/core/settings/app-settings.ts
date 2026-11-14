@@ -5,6 +5,7 @@ import { isProviderConfigured } from "../../../shared/provider";
 import type {
   AppSettings,
   Language,
+  ProviderProfile,
   ProviderSettings,
   ReasoningEffort,
   SettingsPatch,
@@ -16,6 +17,7 @@ import { ulid } from "../ids/ulid";
 
 const SETTINGS_KEY = "app.settings.v1";
 const API_KEY = "app.provider.apiKey.v1";
+const SEARCH_API_KEY = "app.provider.searchApiKey.v1";
 
 interface StoredProvider {
   kind: ProviderSettings["kind"];
@@ -26,6 +28,9 @@ interface StoredProvider {
   compactionRatio: number;
   inputPricePerMillion: number;
   outputPricePerMillion: number;
+  searchEndpoint: string;
+  customHeaders: Record<string, string>;
+  compactionMode: "auto" | "trim" | "llm";
 }
 
 interface StoredSettings {
@@ -33,6 +38,7 @@ interface StoredSettings {
   theme: ThemeMode;
   glass: GlassStrength;
   provider: StoredProvider;
+  providerProfiles: ProviderProfile[];
   agent: AppSettings["agent"];
   identity: AppSettings["identity"];
   ui: AppSettings["ui"];
@@ -80,11 +86,16 @@ function defaults(): StoredSettings {
       compactionRatio: DEFAULT_COMPACTION_RATIO,
       inputPricePerMillion: 0,
       outputPricePerMillion: 0,
+      searchEndpoint: "",
+      customHeaders: {},
+      compactionMode: "auto",
     },
+    providerProfiles: [],
     agent: {
       semanticScan: true,
       temperature: 0.2,
       maxTokens: 8000,
+      maxWorkers: 0,
     },
     identity: {
       actorId: `user:${currentUserName()}:${ulid()}`,
@@ -103,6 +114,37 @@ function defaults(): StoredSettings {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeProfiles(raw: unknown, fallback: ProviderProfile[]): ProviderProfile[] {
+  if (!Array.isArray(raw)) return fallback;
+  const seen = new Set<string>();
+  const profiles: ProviderProfile[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.name !== "string" || !record.name.trim()) continue;
+    if (typeof record.baseUrl !== "string" || !record.baseUrl.trim()) continue;
+    if (!PROVIDER_KINDS.has(record.kind as ProviderSettings["kind"])) continue;
+    if (typeof record.model !== "string") continue;
+    const id = typeof record.id === "string" && record.id ? record.id : ulid();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    profiles.push({
+      id,
+      name: record.name.trim().slice(0, 80),
+      kind: record.kind as ProviderSettings["kind"],
+      baseUrl: record.baseUrl.trim(),
+      model: record.model.trim(),
+      reasoningEffort: REASONING_EFFORTS.has(record.reasoningEffort as ReasoningEffort)
+        ? (record.reasoningEffort as ReasoningEffort)
+        : "auto",
+      ...(typeof record.contextWindow === "number" ? { contextWindow: record.contextWindow } : {}),
+      hasApiKey: record.hasApiKey === true,
+    });
+    if (profiles.length >= 32) break;
+  }
+  return profiles;
 }
 
 function normalize(raw: unknown): StoredSettings {
@@ -149,6 +191,10 @@ function normalize(raw: unknown): StoredSettings {
         1,
         fallback.provider.compactionRatio,
       ),
+      compactionMode:
+        (["auto", "trim", "llm"].includes(provider.compactionMode as string)
+          ? (provider.compactionMode as ProviderSettings["compactionMode"])
+          : fallback.provider.compactionMode) ?? "auto",
       inputPricePerMillion: clamp(
         typeof provider.inputPricePerMillion === "number"
           ? provider.inputPricePerMillion
@@ -165,7 +211,19 @@ function normalize(raw: unknown): StoredSettings {
         10_000,
         fallback.provider.outputPricePerMillion,
       ),
+      searchEndpoint:
+        typeof provider.searchEndpoint === "string"
+          ? provider.searchEndpoint.trim()
+          : fallback.provider.searchEndpoint,
+      customHeaders: isRecord(provider.customHeaders)
+        ? Object.fromEntries(
+            Object.entries(provider.customHeaders)
+              .filter(([key, value]) => typeof key === "string" && typeof value === "string")
+              .map(([key, value]) => [key, value as string]),
+          )
+        : fallback.provider.customHeaders,
     },
+    providerProfiles: normalizeProfiles(raw.providerProfiles, fallback.providerProfiles),
     agent: {
       semanticScan:
         typeof agent.semanticScan === "boolean" ? agent.semanticScan : fallback.agent.semanticScan,
@@ -181,6 +239,14 @@ function normalize(raw: unknown): StoredSettings {
           512,
           32000,
           fallback.agent.maxTokens,
+        ),
+      ),
+      maxWorkers: Math.round(
+        clamp(
+          typeof agent.maxWorkers === "number" ? agent.maxWorkers : fallback.agent.maxWorkers,
+          0,
+          4,
+          fallback.agent.maxWorkers,
         ),
       ),
     },
@@ -264,7 +330,9 @@ export class SettingsStore {
       provider: {
         ...raw.provider,
         hasApiKey: Boolean(getSetting(this.app, API_KEY)),
+        hasSearchApiKey: Boolean(getSetting(this.app, SEARCH_API_KEY)),
       },
+      providerProfiles: raw.providerProfiles,
       agent: raw.agent,
       identity: raw.identity,
       ui: raw.ui,
@@ -277,6 +345,11 @@ export class SettingsStore {
 
   getProviderApiKey(): string | null {
     const stored = getSetting(this.app, API_KEY);
+    return stored ? decodeSecret(stored) : null;
+  }
+
+  getSearchApiKey(): string | null {
+    const stored = getSetting(this.app, SEARCH_API_KEY);
     return stored ? decodeSecret(stored) : null;
   }
 
@@ -315,6 +388,12 @@ export class SettingsStore {
         raw.provider.compactionRatio,
       );
     }
+    if (
+      patch.providerCompactionMode &&
+      ["auto", "trim", "llm"].includes(patch.providerCompactionMode)
+    ) {
+      raw.provider.compactionMode = patch.providerCompactionMode;
+    }
     if (typeof patch.providerInputPrice === "number") {
       raw.provider.inputPricePerMillion = clamp(
         patch.providerInputPrice,
@@ -331,6 +410,42 @@ export class SettingsStore {
         raw.provider.outputPricePerMillion,
       );
     }
+    if (typeof patch.providerSearchEndpoint === "string") {
+      raw.provider.searchEndpoint = patch.providerSearchEndpoint.trim();
+    }
+    if (patch.providerCustomHeaders !== undefined) {
+      raw.provider.customHeaders =
+        patch.providerCustomHeaders === null
+          ? {}
+          : Object.fromEntries(
+              Object.entries(patch.providerCustomHeaders)
+                .filter(([key, value]) => typeof key === "string" && typeof value === "string")
+                .map(([key, value]) => [key, value as string]),
+            );
+    }
+    if (patch.saveProviderProfile?.name) {
+      const current = raw.provider;
+      const hasKey = Boolean(getSetting(this.app, API_KEY));
+      const profile: ProviderProfile = {
+        id: patch.saveProviderProfile.id || ulid(),
+        name: patch.saveProviderProfile.name.trim().slice(0, 80) || "Provider",
+        kind: current.kind,
+        baseUrl: current.baseUrl,
+        model: current.model,
+        reasoningEffort: current.reasoningEffort,
+        contextWindow: current.contextWindow,
+        hasApiKey: hasKey,
+      };
+      const rest = raw.providerProfiles.filter((entry) => entry.id !== profile.id);
+      // Dedupe by name: re-saving overwrites the entry with that name.
+      const deduped = rest.filter((entry) => entry.name !== profile.name);
+      raw.providerProfiles = [profile, ...deduped].slice(0, 32);
+    }
+    if (patch.deleteProviderProfileId) {
+      raw.providerProfiles = raw.providerProfiles.filter(
+        (entry) => entry.id !== patch.deleteProviderProfileId,
+      );
+    }
     if (typeof patch.semanticScan === "boolean") {
       raw.agent.semanticScan = patch.semanticScan;
     }
@@ -339,6 +454,9 @@ export class SettingsStore {
     }
     if (typeof patch.maxTokens === "number") {
       raw.agent.maxTokens = Math.round(clamp(patch.maxTokens, 512, 32000, raw.agent.maxTokens));
+    }
+    if (typeof patch.agentMaxWorkers === "number") {
+      raw.agent.maxWorkers = Math.round(clamp(patch.agentMaxWorkers, 0, 4, raw.agent.maxWorkers));
     }
     if (typeof patch.userName === "string" && patch.userName.trim()) {
       raw.identity.name = patch.userName.trim();
@@ -362,6 +480,13 @@ export class SettingsStore {
         setSetting(this.app, API_KEY, encodeSecret(patch.apiKey.trim()));
       }
     }
+    if (patch.searchApiKey !== undefined) {
+      if (patch.searchApiKey === null || patch.searchApiKey.trim() === "") {
+        deleteSetting(this.app, SEARCH_API_KEY);
+      } else {
+        setSetting(this.app, SEARCH_API_KEY, encodeSecret(patch.searchApiKey.trim()));
+      }
+    }
 
     this.writeRaw(raw);
     return this.get();
@@ -376,8 +501,12 @@ export class SettingsStore {
     reasoningEffort: ReasoningEffort;
     contextWindow: number;
     compactionRatio: number;
+    compactionMode: "auto" | "trim" | "llm";
     inputPricePerMillion: number;
     outputPricePerMillion: number;
+    searchEndpoint: string;
+    searchApiKey: string | null;
+    customHeaders: Record<string, string>;
   } {
     const settings = this.get();
     return {
@@ -388,8 +517,12 @@ export class SettingsStore {
       reasoningEffort: settings.provider.reasoningEffort ?? "auto",
       contextWindow: settings.provider.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       compactionRatio: settings.provider.compactionRatio ?? DEFAULT_COMPACTION_RATIO,
+      compactionMode: settings.provider.compactionMode ?? "auto",
       inputPricePerMillion: settings.provider.inputPricePerMillion ?? 0,
       outputPricePerMillion: settings.provider.outputPricePerMillion ?? 0,
+      searchEndpoint: settings.provider.searchEndpoint ?? "",
+      searchApiKey: this.getSearchApiKey(),
+      customHeaders: settings.provider.customHeaders ?? {},
     };
   }
 
