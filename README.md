@@ -7,6 +7,28 @@
 [![Latest release](https://img.shields.io/github/v/release/ZYF93/Jin)](https://github.com/ZYF93/Jin/releases)
 [![Build and release](https://github.com/ZYF93/Jin/actions/workflows/release.yml/badge.svg)](https://github.com/ZYF93/Jin/actions/workflows/release.yml)
 
+## Why architecture-first?
+
+Most coding agents write code first and hand you a diff at the end — the bigger the change, the more you have to read before you can trust it. Jin flips that. It first proposes the **architecture change** (which modules/symbols are touched, the impact surface, and acceptance criteria). You review and approve that proposal, and only then is any code written.
+
+The result:
+
+- **No need to read every line.** You review intent and impact, not an 800-line diff.
+- **No drift.** Implementation is restricted to the approved file whitelist; edits that step out of scope are rejected.
+- **No manual verification.** After writing, Jin runs your project's test / typecheck / lint, feeds failures back for one self-repair pass, and checks the result against the approved architecture.
+- **Reversible.** Every turn is a versioned WAL entry with a Git checkpoint, undoable in one click without touching `HEAD`.
+
+## How it compares
+
+| | Core idea | Strength | Where Jin differs |
+| --- | --- | --- | --- |
+| **Codex** | Sandboxed execution + approval policy | Security model, stable patching | Jin adds an intent-level gate before any code |
+| **OpenCode** | Broad providers, tools, sessions | Feature breadth | Jin narrows context to symbol-level facts instead of the whole repo |
+| **Claude Code** | Strong model + hooks/subagents | Agentic capability | Jin reviews **intent** not code; auto-verification loop is built in |
+| **Jin** | **Architecture gate first** | Reviewable change + bounded edits + self-repair + versioning | Acceptance is moved up to the intent layer |
+
+A full walkthrough of the differences is in [docs/overview.md](docs/overview.md).
+
 ## What Jin does
 
 - Scans a project into an architecture map with **L0 modules** and **L1 files or components**. LSP servers add symbol facts and source navigation where available.
@@ -16,7 +38,7 @@
 - Before changes reach the project, Jin checks the approved file scope and independently reviews each acceptance criterion. Invalid patches or failed reviews leave project source files unchanged.
 - Searches existing code for reuse before writing, then rescans and reports architecture drift after implementation.
 - Keeps the shared architecture history in `.jin/wal.jsonl`, so it can be reviewed and merged with normal Git workflows.
-- Connects to OpenAI-compatible APIs or Ollama. Model lists can be refreshed from the provider, and a custom model ID can be entered if it is not listed.
+- Connects to OpenAI Chat/Responses, Anthropic Messages, Google Gemini, Ollama, and custom gateways. Model lists can be refreshed from the provider, a built-in preset table fills in context window and price, and a custom model ID can be entered if it is not listed. Optional web-search endpoint and per-provider custom request headers are supported.
 - Includes Git branch switching, change staging, commits, history, and remote operations in the desktop app.
 
 ## Install
@@ -113,6 +135,15 @@ pnpm run jin:init --name "sample-app" --languages typescript,react
 ```
 
 The initialization command is idempotent. It creates the project files if needed and does not truncate an existing WAL. Use `--help` to see the available options.
+
+## Documentation
+
+| Doc | What it covers |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | First run, configuring a provider, your first approved change |
+| [Overview: strengths & limits](docs/overview.md) | When Jin fits, when it does not, and how it compares to Codex/OpenCode/Claude Code |
+| [Providers & models](docs/providers.md) | All supported protocols, 2026 model presets, custom headers, search endpoint |
+| [WAL format](docs/wal.md) | The `.jin/wal.jsonl` architecture ledger, records, versions, and the Git merge driver |
 
 ## Build from source
 

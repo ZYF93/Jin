@@ -7,6 +7,28 @@
 [![最新版本](https://img.shields.io/github/v/release/ZYF93/Jin)](https://github.com/ZYF93/Jin/releases)
 [![构建与发布](https://github.com/ZYF93/Jin/actions/workflows/release.yml/badge.svg)](https://github.com/ZYF93/Jin/actions/workflows/release.yml)
 
+## 为什么是"架构优先"
+
+大多数 coding agent 都是先写代码、最后甩给你一份 diff——改动越大，你要读的东西越多才敢信任。Jin 反过来：它先提出**架构变更**（动哪些模块/符号、影响面、验收标准），你审阅并批准这份提案后，才允许写任何代码。
+
+因此：
+
+- **不用逐行读**：你审的是意图和影响面，不是 800 行 diff。
+- **不漂移**：实现被限制在批准的文件白名单内，越界编辑会被拒绝。
+- **不用手动验证**：写完后自动跑项目的 test / typecheck / lint，失败回灌自修一轮，再对照批准的架构检查。
+- **可逆**：每轮实现都是一个带 Git checkpoint 的 WAL 版本，一键撤销、不动 `HEAD`。
+
+## 它和别家怎么比
+
+| | 核心思路 | 强项 | Jin 的不同 |
+| --- | --- | --- | --- |
+| **Codex** | 沙箱执行 + 审批策略 | 安全模型、稳定的补丁 | Jin 在任何代码前多一道"意图层"闸门 |
+| **OpenCode** | 广 provider、工具、会话 | 功能广 | Jin 把上下文收窄到符号级事实，而非整仓 |
+| **Claude Code** | 强模型 + hooks/子代理 | agentic 能力 | Jin 审的是**意图**不是代码；验证循环内置 |
+| **Jin** | **架构闸门优先** | 可审的变更 + 受限编辑 + 自修 + 版本化 | 验收前移到意图层 |
+
+差异的完整讲解见 [docs/overview.zh-CN.md](docs/overview.zh-CN.md)。
+
 ## Jin 能做什么
 
 - 扫描项目并生成架构图：**L0 模块**和 **L1 文件或组件**。语言服务器可补充符号事实和源码跳转信息。
@@ -16,7 +38,7 @@
 - 实现写回前会检查文件范围并逐项复核已批准的验收条件；补丁校验失败或验收不通过时不会修改项目源码。
 - 编写代码前检索已有实现供复用，完成后重新扫描并报告架构偏差。
 - 将团队共享的架构历史保存在 `.jin/wal.jsonl`，可通过普通 Git 工作流审阅和合并。
-- 支持 OpenAI 兼容接口和 Ollama。可以从 Provider 刷新模型列表，也可以手动输入列表里没有的模型 ID。
+- 支持 OpenAI Chat/Responses、Anthropic Messages、Google Gemini、Ollama 与自定义网关。可从 Provider 刷新模型列表，内置预设表会自动带出上下文窗口与价格；列表里没有的模型可手动输入 ID。支持可选的网页搜索端点与每个 Provider 的自定义请求头。
 - 在桌面应用中管理 Git 分支、暂存变更、提交、查看历史和操作远端。
 
 ## 安装
@@ -113,6 +135,15 @@ pnpm run jin:init --name "sample-app" --languages typescript,react
 ```
 
 初始化命令可以重复运行：缺少项目文件时会创建它们，但不会截断已有 WAL。使用 `--help` 查看所有参数。
+
+## 文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [快速上手](docs/getting-started.zh-CN.md) | 首次运行、配置 Provider、完成第一个被批准的变更 |
+| [概览：优势与局限](docs/overview.zh-CN.md) | Jin 适合/不适合的场景，以及与 Codex/OpenCode/Claude Code 的对比 |
+| [Provider 与模型](docs/providers.zh-CN.md) | 支持的协议、2026 模型预设、自定义请求头、搜索端点 |
+| [WAL 格式](docs/wal.zh-CN.md) | `.jin/wal.jsonl` 架构账本、记录、版本与 Git 合并驱动 |
 
 ## 从源码构建
 
