@@ -905,8 +905,12 @@ function registerIpcHandlers(): void {
     },
   );
 
-  ipcMain.handle(IPC_CHANNELS.undoImplementation, async (): Promise<AppState> =>
-    requireSession().undoLastImplementation(),
+  ipcMain.handle(
+    IPC_CHANNELS.undoImplementation,
+    async (_event, versionId: unknown): Promise<AppState> =>
+      requireSession().undoLastImplementation(
+        typeof versionId === "string" && versionId ? versionId : undefined,
+      ),
   );
 
   ipcMain.handle(IPC_CHANNELS.gitStatus, (): Promise<GitStatus> =>

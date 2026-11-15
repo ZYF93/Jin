@@ -138,6 +138,118 @@ function parseList(
   return { node, next: index };
 }
 
+/** Split a markdown table row into trimmed cell strings, handling escaped pipes. */
+function splitTableRow(row: string): string[] {
+  const cells: string[] = [];
+  let current = "";
+  for (let i = 0; i < row.length; i += 1) {
+    const ch = row[i];
+    if (ch === "\\" && row[i + 1] === "|") {
+      current += "|";
+      i += 1;
+    } else if (ch === "|") {
+      cells.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  cells.push(current);
+  // Drop the leading/trailing empty cells produced by the outer pipes.
+  if (cells[0]?.trim() === "") cells.shift();
+  if (cells[cells.length - 1]?.trim() === "") cells.pop();
+  return cells.map((cell) => cell.trim());
+}
+
+function isTableSeparator(line: string): boolean {
+  const trimmed = line.trim();
+  return /^\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?$/.test(trimmed) && trimmed.includes("|");
+}
+
+/** Parse a GFM table block starting at `start`; returns the rendered node and next index. */
+function parseTable(
+  lines: string[],
+  start: number,
+  prefix: string,
+): { node: ReactNode; next: number } {
+  const headerRow = lines[start] ?? "";
+  if (
+    !headerRow.includes("|") ||
+    start + 1 >= lines.length ||
+    !isTableSeparator(lines[start + 1] ?? "")
+  ) {
+    return { node: null, next: start + 1 };
+  }
+  const headCells = splitTableRow(headerRow.replace(/^\s*\|/, "").replace(/\|\s*$/, ""));
+  const aligns = splitTableRow(lines[start + 1] ?? "").map((cell) => {
+    const cleaned = cell.replace(/[:\s|-]/g, "");
+    if (cell.trim().startsWith(":") && cell.trim().endsWith(":")) return "center";
+    if (cell.trim().endsWith(":")) return "right";
+    if (cell.trim().startsWith(":")) return "left";
+    return cleaned ? "left" : null;
+  });
+  const rows: string[][] = [];
+  let index = start + 2;
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    if (!line.trim() || !line.includes("|")) break;
+    if (isTableSeparator(line)) break;
+    rows.push(splitTableRow(line.replace(/^\s*\|/, "").replace(/\|\s*$/, "")));
+    index += 1;
+  }
+  const body = rows.map((cells, rowIdx) => (
+    <tr key={`${prefix}-row-${rowIdx}`}>
+      {headCells.map((_, colIdx) => {
+        const value = cells[colIdx] ?? "";
+        const align = aligns[colIdx];
+        return (
+          <td
+            key={`${prefix}-row-${rowIdx}-col-${colIdx}`}
+            className="message-table-cell"
+            style={
+              align === "center"
+                ? { textAlign: "center" }
+                : align === "right"
+                  ? { textAlign: "right" }
+                  : undefined
+            }
+          >
+            {inline(value, `${prefix}-row-${rowIdx}-col-${colIdx}`)}
+          </td>
+        );
+      })}
+    </tr>
+  ));
+  const node = (
+    <table className="message-table" key={`${prefix}-table`}>
+      <thead>
+        <tr>
+          {headCells.map((cell, colIdx) => {
+            const align = aligns[colIdx];
+            return (
+              <th
+                key={`${prefix}-head-${colIdx}`}
+                className="message-table-head"
+                style={
+                  align === "center"
+                    ? { textAlign: "center" }
+                    : align === "right"
+                      ? { textAlign: "right" }
+                      : undefined
+                }
+              >
+                {inline(cell, `${prefix}-head-${colIdx}`)}
+              </th>
+            );
+          })}
+        </tr>
+      </thead>
+      {body.length > 0 ? <tbody>{body}</tbody> : null}
+    </table>
+  );
+  return { node, next: index };
+}
+
 function blocks(lines: string[], prefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   let index = 0;
@@ -210,6 +322,15 @@ function blocks(lines: string[], prefix: string): ReactNode[] {
       nodes.push(<div key={`${prefix}-${sequence++}`}>{parsed.node}</div>);
       index = Math.max(parsed.next, index + 1);
       continue;
+    }
+
+    if (line.includes("|") && isTableSeparator(lines[index + 1] ?? "")) {
+      const parsed = parseTable(lines, index, `${prefix}-table-${sequence}`);
+      if (parsed.node) {
+        nodes.push(parsed.node);
+        index = parsed.next;
+        continue;
+      }
     }
 
     const paragraph: string[] = [line];

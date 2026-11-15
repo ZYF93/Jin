@@ -106,9 +106,11 @@ import { UsageLedger, type UsageSource } from "./metrics/usage";
 import { computeProjectMetrics } from "./metrics/metrics";
 import { normalizeProjectPath, runEkoCoder } from "./agent/eko-runtime";
 import {
+  formatFacetIntents,
   implementationScopePaths,
   implementationTaskPaths,
   independentImplementationTasks,
+  intentsForScope,
 } from "./agent/implementation-scope";
 import {
   createImplementationWorkspace,
@@ -319,8 +321,10 @@ export class ProjectSession {
   private conversationSummary = "";
   /** How many times the conversation has been compacted this session. */
   private compactionCount = 0;
-  /** Last pre-implementation Git checkpoint (best-effort, may be null). */
-  private lastCheckpoint: { hash: string; versionId: string; createdAt: string } | null = null;
+  /** Pre-implementation Git checkpoints by version id (best-effort; may be empty). */
+  private readonly checkpoints = new Map<string, { hash: string; createdAt: string }>();
+  /** Most recent checkpoint version, used by the default undo. */
+  private lastCheckpointVersionId: string | null = null;
   /** Images attached to the most recent user turn, forwarded to implementations. */
   private lastUserImages: import("./agent/provider").ImageAttachment[] = [];
   private closed = false;
@@ -1956,6 +1960,29 @@ export class ProjectSession {
     return lines.slice(0, 40).join("\n");
   }
 
+  /** Facet/L1 intents relevant to one worker's file scope (pure helper). */
+  private relevantNodeIntents(
+    scope: ReadonlySet<string> | null,
+  ): import("../../shared/arch/types").NodeIntent[] {
+    return intentsForScope(
+      this.proposal?.intent.nodeIntents ?? [],
+      scope,
+      this.proposal?.targetSnapshot ?? this.snapshot,
+      this.proposal?.baseSnapshot,
+    );
+  }
+
+  /** Render facet/L1 intents as a prominent, model-visible block. */
+  private facetIntentBlock(
+    intents: readonly import("../../shared/arch/types").NodeIntent[],
+  ): string {
+    return formatFacetIntents(
+      intents,
+      this.proposal?.targetSnapshot ?? this.snapshot,
+      this.proposal?.baseSnapshot,
+    );
+  }
+
   /**
    * Load attached image paths into data URLs for vision models. Strings that
    * are already data URLs pass through; project-relative paths are read and
@@ -2074,7 +2101,8 @@ export class ProjectSession {
     // chat exposes it so the user can undo the whole turn afterwards.
     const checkpoint = await createCheckpoint(this.root, `jin: ${proposal.intent.title}`);
     if (checkpoint) {
-      this.lastCheckpoint = { hash: checkpoint, versionId: proposal.id, createdAt: nowIso() };
+      this.checkpoints.set(proposal.id, { hash: checkpoint, createdAt: nowIso() });
+      this.lastCheckpointVersionId = proposal.id;
       logLlm({
         event: "checkpoint",
         phase: "checkpoint",
@@ -2140,6 +2168,7 @@ Rules:
 - Never modify .jin/, .git/, node_modules/, dist/, dist-electron/, or release/. The tools reject those paths.
 - Keep the change within approved files or their conventional test companions. Do not add helper files unless they are explicitly present in the approved architecture scope.
 - Before finishing, run run_checks and fix any failing typecheck/test/lint check.
+- Before finishing, go through every line of the "Facet-level intent (must satisfy)" block and confirm in your summary that each one is satisfied (or explain why it could not be).
 - Work until the implementation is complete, then finish with a short plain-text summary of what changed.
 - If an approved file cannot be implemented, explain why in the summary instead of inventing unrelated files.`;
       const agentRules = this.agentRules();
@@ -2168,8 +2197,9 @@ Rules:
         independent.length > 1 ? [...independent] : [null];
       const workerInput = (
         task: IntentTask | null,
-      ): { text: string; scope: ReadonlySet<string> } => {
+      ): { text: string; scope: ReadonlySet<string>; relevantIntents: number } => {
         const workerIntent = task ? { ...proposal.intent, tasks: [task] } : proposal.intent;
+        const scope = task ? implementationTaskPaths(task.files ?? []) : allowedPaths;
         const readPaths = task
           ? unique([
               ...task.files!,
@@ -2184,6 +2214,10 @@ Rules:
             `Architecture nodes without a resolved file (locate them with grep/glob): ${unresolved.join(", ")}`,
           );
         }
+        // Only this worker's facet/L1 intents, rendered prominently so the model
+        // must satisfy them rather than digging them out of the intent JSON.
+        const intents = this.relevantNodeIntents(task ? scope : null);
+        const facetBlock = this.facetIntentBlock(intents);
         return {
           text: [
             `Intent:\n${JSON.stringify(workerIntent, null, 2)}`,
@@ -2193,6 +2227,9 @@ Rules:
             task
               ? `Assigned task:\n${JSON.stringify(task, null, 2)}\nOnly implement this task in these approved paths: ${task.files?.join(", ")}`
               : "Implement the approved Intent and all its tasks.",
+            facetBlock
+              ? `Facet-level intent (must satisfy):\n${facetBlock}\nConfirm each of these is satisfied before you finish.`
+              : "",
             skills ? `Skills:\n${skills}` : "",
             workerContext
               ? `Existing source context (symbol-narrowed):\n${workerContext}`
@@ -2204,7 +2241,8 @@ Rules:
           ]
             .filter(Boolean)
             .join("\n\n"),
-          scope: task ? implementationTaskPaths(task.files ?? []) : allowedPaths,
+          scope,
+          relevantIntents: intents.length,
         };
       };
       const warnings: string[] = [];
@@ -2691,7 +2729,7 @@ Rules:
    * checkpoint into the working tree. HEAD is not moved; the architecture
    * ledger is not touched. Only offered while no agent is running.
    */
-  async undoLastImplementation(): Promise<AppState> {
+  async undoLastImplementation(versionId?: string): Promise<AppState> {
     if (
       this.agentStatus.phase === "planning" ||
       this.agentStatus.phase === "implementing" ||
@@ -2699,19 +2737,22 @@ Rules:
     ) {
       throw new Error(this.t("error.agentWorking"));
     }
-    if (!this.lastCheckpoint) {
+    const targetVersion = versionId ?? this.lastCheckpointVersionId;
+    const checkpoint = targetVersion ? this.checkpoints.get(targetVersion) : undefined;
+    if (!checkpoint) {
       throw new Error(this.t("error.noCheckpoint"));
     }
-    const result = await restoreCheckpoint(this.root, this.lastCheckpoint.hash);
+    const result = await restoreCheckpoint(this.root, checkpoint.hash);
+    this.checkpoints.delete(targetVersion as string);
+    if (this.lastCheckpointVersionId === targetVersion) this.lastCheckpointVersionId = null;
     this.addMessage(
       "system",
       "text",
       this.t("session.checkpointRestored", {
         files: result.restored,
-        hash: this.lastCheckpoint.hash.slice(0, 12),
+        hash: checkpoint.hash.slice(0, 12),
       }),
     );
-    this.lastCheckpoint = null;
     await this.scan();
     this.emitState();
     return this.getState();

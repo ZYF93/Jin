@@ -689,7 +689,7 @@ export interface JinBridge {
   /** Fetch model ids and capability hints from the configured provider. */
   listModels(request: ProviderModelRequest): Promise<ProviderModelCatalog>;
   mcpCall(server: string, tool: string, args?: Record<string, unknown>): Promise<McpCallResult>;
-  undoImplementation(): Promise<AppState>;
+  undoImplementation(versionId?: string): Promise<AppState>;
   gitStatus(): Promise<GitStatus>;
   gitBranches(): Promise<GitBranchList>;
   /** Switch branches; remote names create a local tracking branch on first use. */

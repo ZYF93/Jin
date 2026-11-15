@@ -24,8 +24,9 @@ describe("assertPublicUrl", () => {
     await expect(assertPublicUrl("http://169.254.1.1")).rejects.toThrow(/not allowed/i);
   });
 
-  it("allows public URLs", async () => {
-    const url = await assertPublicUrl("https://docs.example.com/api");
-    expect(url.hostname).toBe("docs.example.com");
+  it("allows public literal-IP URLs without DNS resolution", async () => {
+    // A public literal IP skips the (network-dependent) DNS lookup path.
+    const url = await assertPublicUrl("https://8.8.8.8/");
+    expect(url.hostname).toBe("8.8.8.8");
   });
 });

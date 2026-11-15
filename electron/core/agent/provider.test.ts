@@ -9,6 +9,7 @@ import {
   isToolCallRejection,
   requestHasTools,
   resilientProviderFetch,
+  parseRetryAfterSeconds,
   type ProviderConfig,
   type ProviderTokenUsage,
 } from "./provider";
@@ -896,5 +897,19 @@ describe("image parts across protocols", () => {
       mime_type: "image/png",
       data: "QUJD",
     });
+  });
+});
+
+describe("parseRetryAfterSeconds", () => {
+  it("parses delta-seconds and http-date headers", () => {
+    expect(parseRetryAfterSeconds("42")).toBe(42);
+    expect(parseRetryAfterSeconds(" 7 ")).toBe(7);
+    expect(parseRetryAfterSeconds("0")).toBe(0);
+    expect(parseRetryAfterSeconds("not-a-number")).toBeNull();
+    expect(parseRetryAfterSeconds(null)).toBeNull();
+    const future = new Date(Date.now() + 10_000).toUTCString();
+    expect(parseRetryAfterSeconds(future)).toBeGreaterThan(0);
+    const past = new Date(Date.now() - 10_000).toUTCString();
+    expect(parseRetryAfterSeconds(past)).toBeNull();
   });
 });

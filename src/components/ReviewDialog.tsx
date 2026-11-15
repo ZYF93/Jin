@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { RiskHint } from "../../shared/arch/diff";
+import type { MessageKey } from "../../shared/i18n";
 import type { ProposalView } from "../../shared/ipc";
 import { useT } from "../lib/i18n";
 import {
@@ -79,11 +80,134 @@ function ApprovalFlow({ architectureOnly }: { architectureOnly: boolean }) {
   );
 }
 
+/** Render one L1 node with its own intent plus every facet-level change beneath it. */
+function NodeIntentCard({
+  l1,
+  proposal,
+  t,
+}: {
+  l1: { l1Id: string; nodeIntents: import("../../shared/arch/types").NodeIntent[] };
+  proposal: ProposalView;
+  t: (key: MessageKey, params?: import("../../shared/i18n").TranslationParams) => string;
+}) {
+  const l1Node =
+    proposal.targetSnapshot.nodes[l1.l1Id] ?? proposal.baseSnapshot.nodes[l1.l1Id] ?? null;
+  const l1Change = proposal.diff.nodes[l1.l1Id];
+  // Every facet child of this L1 that the proposal touches (added/removed/modified).
+  const facetChanges = Object.values(proposal.diff.nodes).filter(
+    (change) =>
+      change.after?.level === "facet" &&
+      (change.after.parentId === l1.l1Id || change.before?.parentId === l1.l1Id),
+  );
+  return (
+    <div className="inner-panel p-2">
+      <div className="flex items-center gap-1.5">
+        <span className="font-mono-ui truncate text-[9.5px] font-semibold text-[var(--accent)]">
+          {l1Node?.name ?? l1.l1Id}
+        </span>
+        {l1Change?.change ? (
+          <span
+            className={`chip h-[16px] px-1 text-[7.5px] ${
+              l1Change.change === "added"
+                ? "text-[var(--success)]"
+                : l1Change.change === "removed"
+                  ? "text-[var(--danger)]"
+                  : "text-[var(--warning)]"
+            }`}
+          >
+            {t(`review.nodeChange.${l1Change.change}` as MessageKey)}
+          </span>
+        ) : null}
+        {l1Node ? (
+          <span className="ml-auto text-[7.5px] text-[var(--faint)]">
+            {l1Node.level} · {l1Node.kind}
+            {l1Node.file ? ` · ${l1Node.file}` : ""}
+          </span>
+        ) : null}
+      </div>
+      {l1Node?.responsibility ? (
+        <div className="mt-1 text-[8.5px] leading-relaxed text-[var(--faint)]">
+          {l1Node.responsibility}
+        </div>
+      ) : null}
+      {l1.nodeIntents.map((nodeIntent) => (
+        <div key={nodeIntent.facetId ?? "node"} className="mt-1.5 text-[9px]">
+          <span className="text-[8px] font-semibold text-[var(--muted)]">
+            {t("review.nodeIntentStatement")}
+          </span>
+          <div className="mt-0.5 leading-relaxed text-[var(--muted)]">{nodeIntent.statement}</div>
+        </div>
+      ))}
+      {facetChanges.length > 0 ? (
+        <div className="mt-1.5">
+          <div className="text-[8px] font-semibold uppercase tracking-wide text-[var(--faint)]">
+            {t("review.facetIntents")} ({facetChanges.length})
+          </div>
+          <div className="mt-1 space-y-1">
+            {facetChanges.map((change) => {
+              const facet = change.after ?? change.before;
+              if (!facet) return null;
+              const intentForFacet = l1.nodeIntents.find(
+                (nodeIntent) => nodeIntent.facetId === change.id,
+              );
+              return (
+                <div
+                  key={change.id}
+                  className="rounded-md border border-[var(--border)] bg-[var(--panel)]/60 px-1.5 py-1"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono-ui text-[8.5px] font-semibold text-[var(--text)]">
+                      {facet.name}
+                    </span>
+                    <span
+                      className={`chip h-[14px] px-1 text-[7px] ${
+                        change.change === "added"
+                          ? "text-[var(--success)]"
+                          : change.change === "removed"
+                            ? "text-[var(--danger)]"
+                            : "text-[var(--warning)]"
+                      }`}
+                    >
+                      {t(`review.nodeChange.${change.change}` as MessageKey)}
+                    </span>
+                    <span className="ml-auto text-[7.5px] text-[var(--faint)]">{facet.kind}</span>
+                  </div>
+                  {intentForFacet?.statement ? (
+                    <div className="mt-0.5 text-[8.5px] leading-relaxed text-[var(--muted)]">
+                      {intentForFacet.statement}
+                    </div>
+                  ) : null}
+                  {change.fields.length > 0 ? (
+                    <div className="mt-0.5 text-[7.5px] text-[var(--faint)]">
+                      {change.fields.join(", ")}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : l1.nodeIntents.length === 0 ? (
+        <div className="mt-1.5 text-[8px] text-[var(--faint)]">{t("review.noFacetChanges")}</div>
+      ) : null}
+    </div>
+  );
+}
+
 function ReviewDetails({ proposal }: { proposal: ProposalView }) {
   const t = useT();
   const intent = proposal.intent;
   const nodes = intent.nodeIntents;
   const stale = proposal.status === "stale";
+  // Group node intents by their L1 node so each L1 card can also show every
+  // facet-level change the proposal makes beneath it.
+  const l1Order: string[] = [];
+  const l1Intents = new Map<string, import("../../shared/arch/types").NodeIntent[]>();
+  for (const nodeIntent of nodes) {
+    if (!l1Order.includes(nodeIntent.nodeId)) l1Order.push(nodeIntent.nodeId);
+    l1Intents.set(nodeIntent.nodeId, [...(l1Intents.get(nodeIntent.nodeId) ?? []), nodeIntent]);
+  }
+  const groupedL1 = l1Order.map((l1Id) => ({ l1Id, nodeIntents: l1Intents.get(l1Id) ?? [] }));
 
   return (
     <div className="space-y-4 p-4">
@@ -175,45 +299,31 @@ function ReviewDetails({ proposal }: { proposal: ProposalView }) {
 
       <section>
         <div className="panel-title mb-2">
-          {t("review.nodeIntents")} <span className="text-[var(--faint)]">({nodes.length})</span>
+          {t("review.nodeIntents")}{" "}
+          <span className="text-[var(--faint)]">
+            ({groupedL1.length ? groupedL1.length : nodes.length})
+          </span>
         </div>
         {nodes.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--border)] px-3 py-2.5 text-[9px] leading-relaxed text-[var(--faint)]">
             {t("review.structuralOnly")}
           </div>
+        ) : groupedL1.length > 0 ? (
+          <div className="space-y-1.5">
+            {groupedL1.map((l1) => (
+              <NodeIntentCard key={l1.l1Id} l1={l1} proposal={proposal} t={t} />
+            ))}
+          </div>
         ) : (
           <div className="space-y-1.5">
-            {nodes.map((nodeIntent) => {
-              const target =
-                proposal.targetSnapshot.nodes[nodeIntent.facetId ?? nodeIntent.nodeId] ??
-                proposal.baseSnapshot.nodes[nodeIntent.facetId ?? nodeIntent.nodeId];
-              return (
-                <div
-                  key={`${nodeIntent.nodeId}:${nodeIntent.facetId ?? ""}`}
-                  className="inner-panel p-2"
-                >
-                  <div className="font-mono-ui truncate text-[9px] font-semibold text-[var(--accent)]">
-                    {target?.name ?? nodeIntent.nodeId}
-                  </div>
-                  <div className="mt-1 text-[9.5px] leading-relaxed text-[var(--muted)]">
-                    {nodeIntent.statement}
-                  </div>
-                  {nodeIntent.invariants.length > 0 ? (
-                    <div className="mt-1.5 space-y-0.5">
-                      {nodeIntent.invariants.map((invariant) => (
-                        <div
-                          key={invariant}
-                          className="flex items-start gap-1 text-[8.5px] text-[var(--faint)]"
-                        >
-                          <ShieldCheck size={8} className="mt-0.5 shrink-0" />
-                          <span>{invariant}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
+            {nodes.map((nodeIntent) => (
+              <NodeIntentCard
+                key={`${nodeIntent.nodeId}:${nodeIntent.facetId ?? ""}`}
+                l1={{ l1Id: nodeIntent.nodeId, nodeIntents: [nodeIntent] }}
+                proposal={proposal}
+                t={t}
+              />
+            ))}
           </div>
         )}
       </section>

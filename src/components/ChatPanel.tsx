@@ -1,10 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   Bot,
   Brain,
   CheckCircle2,
+  Copy,
+  Check,
   GitPullRequest,
   MessageSquare,
   ScanSearch,
@@ -60,13 +62,30 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const t = useT();
   const proposal = useJin((state) => state.app?.proposal ?? null);
   const setReviewOpen = useJin((state) => state.setReviewOpen);
+  const busy = useJin((state) => state.busy);
+  const undoImplementation = useJin((state) => state.undoImplementation);
+  const setComposerSeed = useJin((state) => state.setComposerSeed);
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const current =
     proposal && message.proposalId && proposal.id === message.proposalId ? proposal : null;
-  const busy = useJin((state) => state.busy);
-  const undoImplementation = useJin((state) => state.undoImplementation);
-  const undoAvailable = message.kind === "implementation" && !busy;
+  const [copied, setCopied] = useState(false);
+  const undoAvailable =
+    !busy && !isSystem && (isUser || message.kind === "implementation" || message.kind === "error");
+  const doUndo = async (): Promise<void> => {
+    const versionId = message.proposalId ?? undefined;
+    await undoImplementation(versionId);
+    if (isUser && message.content.trim()) setComposerSeed(message.content);
+  };
+  const copyMessage = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
 
   if (isSystem) {
     return (
@@ -127,12 +146,23 @@ function ChatBubble({ message }: { message: ChatMessage }) {
           {message.proposalId && !current && isReviewing(proposal) === false ? (
             <span>· {t("chat.historical")}</span>
           ) : null}
+          {!isSystem ? (
+            <button
+              type="button"
+              className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded text-[var(--faint)] transition-colors hover:text-[var(--text)]"
+              onClick={() => void copyMessage()}
+              title={t("chat.copy")}
+              aria-label={t("chat.copy")}
+            >
+              {copied ? <Check size={9} className="text-[var(--success)]" /> : <Copy size={9} />}
+            </button>
+          ) : null}
           {undoAvailable ? (
             <button
               type="button"
-              className="ml-1 inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-0.5 text-[8px] text-[var(--faint)] transition-colors hover:text-[var(--text)]"
-              onClick={() => void undoImplementation()}
-              title={t("chat.undoHint")}
+              className="ml-0.5 inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-0.5 text-[8px] text-[var(--faint)] transition-colors hover:text-[var(--text)]"
+              onClick={() => void doUndo()}
+              title={isUser ? t("chat.undoMessage") : t("chat.undoHint")}
             >
               <Undo2 size={9} />
               {t("chat.undo")}
@@ -265,7 +295,16 @@ function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
                     ? t("chat.verifying")
                     : t("chat.agentError")}
             </div>
-            <div className="mt-0.5 truncate text-[9px] text-[var(--muted)]">{agent.message}</div>
+            {agent.message ? (
+              <details className="agent-message-details mt-0.5">
+                <summary className="cursor-pointer text-[9px] text-[var(--muted)]">
+                  {agent.message}
+                </summary>
+                <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[9px] leading-relaxed text-[var(--faint)]">
+                  {agent.message}
+                </pre>
+              </details>
+            ) : null}
           </div>
           {working ? (
             <button

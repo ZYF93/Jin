@@ -66,6 +66,8 @@ interface JinStore {
   fileError: string | null;
   /** Transient assistant text from the current planning/implementation turn. */
   stream: ChatStream | null;
+  /** Text to refill the composer with (e.g. after undoing a message). */
+  composerSeed: string;
   update: UpdateState | null;
   gitStatus: GitStatus | null;
   gitBranches: GitBranchList | null;
@@ -92,7 +94,7 @@ interface JinStore {
   approveProposal: (note?: string) => Promise<void>;
   rejectProposal: (note?: string) => Promise<void>;
   retryImplementation: (versionId?: string) => Promise<void>;
-  undoImplementation: () => Promise<void>;
+  undoImplementation: (versionId?: string) => Promise<void>;
   cancelAgent: () => Promise<void>;
   saveSettings: (patch: SettingsPatch) => Promise<boolean>;
   refreshTools: () => Promise<ToolsInfo | null>;
@@ -133,6 +135,7 @@ interface JinStore {
   setDemoGraph: (enabled: boolean) => void;
   openSettings: (tab?: SettingsTab) => void;
   setSettingsOpen: (open: boolean) => void;
+  setComposerSeed: (text: string) => void;
   setSettingsTab: (tab: SettingsTab) => void;
   setCommandOpen: (open: boolean) => void;
   setReviewOpen: (open: boolean) => void;
@@ -295,6 +298,7 @@ export const useJin = create<JinStore>((set, get) => {
     fileLoading: false,
     fileError: null,
     stream: null,
+    composerSeed: "",
     update: null,
     gitStatus: null,
     gitBranches: null,
@@ -473,9 +477,9 @@ export const useJin = create<JinStore>((set, get) => {
       );
     },
 
-    undoImplementation: async () => {
+    undoImplementation: async (versionId) => {
       try {
-        await execute(t("busy.restoring"), () => window.jin.undoImplementation());
+        await execute(t("busy.restoring"), () => window.jin.undoImplementation(versionId));
         notify("success", t("toast.checkpointRestored"));
       } catch (error) {
         notify("error", errorMessage(error));
@@ -788,6 +792,7 @@ export const useJin = create<JinStore>((set, get) => {
     openSettings: (tab = "general") => set({ settingsOpen: true, settingsTab: tab }),
 
     setSettingsOpen: (open) => set({ settingsOpen: open }),
+    setComposerSeed: (text) => set({ composerSeed: text }),
 
     setSettingsTab: (tab) => set({ settingsTab: tab }),
 

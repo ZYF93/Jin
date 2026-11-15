@@ -316,6 +316,13 @@ export function ChatComposer({
   const loadFileTree = useJin((state) => state.loadFileTree);
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
+  const composerSeed = useJin((state) => state.composerSeed);
+  const setComposerSeed = useJin((state) => state.setComposerSeed);
+  useEffect(() => {
+    if (!composerSeed) return;
+    setText((current) => (current.trim() ? current : composerSeed));
+    setComposerSeed("");
+  }, [composerSeed, setComposerSeed]);
   const [configOpen, setConfigOpen] = useState(false);
   const [mention, setMention] = useState<Mention | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);

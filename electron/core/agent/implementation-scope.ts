@@ -1,4 +1,12 @@
-import type { ArchOp, ArchSnapshot, Intent, IntentTask, Touch } from "../../../shared/ledger/types";
+import type {
+  ArchOp,
+  ArchNode,
+  ArchSnapshot,
+  Intent,
+  IntentTask,
+  NodeIntent,
+  Touch,
+} from "../../../shared/ledger/types";
 import { normalizeProjectPath } from "./path-safety";
 
 function addFile(paths: Set<string>, value: string | undefined): void {
@@ -98,4 +106,51 @@ export function implementationScopePaths(
   }
   addTestCompanions(paths);
   return paths;
+}
+
+/** Project-relative file for a node id, preferring the reviewed proposal snapshots. */
+export function nodeFile(nodeId: string, snapshot: ArchSnapshot, base?: ArchSnapshot): string {
+  return snapshot.nodes[nodeId]?.file || base?.nodes[nodeId]?.file || "";
+}
+
+/**
+ * Keep only the node intents that touch a worker's file scope. When a task has
+ * no explicit files, or an intent cannot be mapped to a file, it is kept so the
+ * intent is never silently dropped.
+ */
+export function intentsForScope(
+  intents: readonly NodeIntent[],
+  scope: ReadonlySet<string> | null,
+  snapshot: ArchSnapshot,
+  base?: ArchSnapshot,
+): NodeIntent[] {
+  if (!scope || scope.size === 0) return [...intents];
+  return intents.filter((nodeIntent) => {
+    const targetId = nodeIntent.facetId ?? nodeIntent.nodeId;
+    const file = nodeFile(targetId, snapshot, base) || nodeFile(nodeIntent.nodeId, snapshot, base);
+    if (!file) return true;
+    return scope.has(file);
+  });
+}
+
+/** Render facet/L1 intents as a prominent, model-visible block. */
+export function formatFacetIntents(
+  intents: readonly NodeIntent[],
+  snapshot: ArchSnapshot,
+  base?: ArchSnapshot,
+): string {
+  if (intents.length === 0) return "";
+  const lookup = (id: string): ArchNode | undefined => snapshot.nodes[id] ?? base?.nodes[id];
+  const lines: string[] = [];
+  for (const nodeIntent of intents) {
+    const facet = nodeIntent.facetId ? lookup(nodeIntent.facetId) : null;
+    const l1 = lookup(nodeIntent.nodeId);
+    const label = facet
+      ? `${l1?.name ?? nodeIntent.nodeId} > ${facet.name}`
+      : (l1?.name ?? nodeIntent.nodeId);
+    lines.push(`- ${label}: ${nodeIntent.statement}`);
+    for (const invariant of nodeIntent.invariants) lines.push(`    invariant: ${invariant}`);
+    for (const criterion of nodeIntent.acceptance) lines.push(`    acceptance: ${criterion}`);
+  }
+  return lines.join("\n");
 }

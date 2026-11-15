@@ -132,6 +132,24 @@ function isTransientStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
+/**
+ * Parse a `Retry-After` header into seconds. Accepts either a delta-seconds
+ * or an HTTP date. Returns `null` when the header is absent or unusable so
+ * callers fall back to their own backoff.
+ */
+export function parseRetryAfterSeconds(header: string | null | undefined): number | null {
+  if (!header) return null;
+  const value = header.trim();
+  if (/^\d+$/.test(value)) {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+  }
+  const dateMs = Date.parse(value);
+  if (Number.isNaN(dateMs)) return null;
+  const seconds = Math.ceil((dateMs - Date.now()) / 1000);
+  return seconds > 0 ? seconds : null;
+}
+
 function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -194,7 +212,10 @@ async function resilientFetch(
   providerCircuits.set(circuitKey, circuit);
 
   let lastError: unknown;
+  let pendingDelayMs: number | null = null;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+    // Reset any Retry-After delay chosen on a previous iteration.
+    pendingDelayMs = null;
     const startedAt = Date.now();
     try {
       const response = await fetchAttempt();
@@ -262,6 +283,22 @@ async function resilientFetch(
         return response;
       }
       await response.body?.cancel().catch(() => undefined);
+      // Honor the provider's own retry hint (429 / 5xx) before our backoff.
+      const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+      const delay =
+        retryAfterSeconds !== null ? retryAfterSeconds * 1000 : RETRY_DELAYS_MS[attempt];
+      if (delay > RETRY_DELAYS_MS[attempt]) {
+        logLlm({
+          event: "http",
+          url: sanitizeUrl(url),
+          method: (init.method as string) || "GET",
+          attempt: attempt + 1,
+          status: response.status,
+          error: `waiting ${retryAfterSeconds}s per provider retry-after`,
+        });
+      }
+      // Stash the chosen delay for the loop below.
+      pendingDelayMs = delay;
     } catch (error) {
       logLlm({
         event: "error",
@@ -283,7 +320,7 @@ async function resilientFetch(
         throw error;
       }
     }
-    await waitForRetry(RETRY_DELAYS_MS[attempt], signal);
+    await waitForRetry(pendingDelayMs ?? RETRY_DELAYS_MS[attempt] ?? 0, signal);
   }
   throw lastError instanceof Error ? lastError : new ProviderError(String(lastError));
 }

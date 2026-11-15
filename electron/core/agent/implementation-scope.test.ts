@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { ArchNode, Intent } from "../../../shared/ledger/types";
 import { emptySnapshot } from "../arch/snapshot";
-import { implementationScopePaths, independentImplementationTasks } from "./implementation-scope";
+import {
+  formatFacetIntents,
+  implementationScopePaths,
+  independentImplementationTasks,
+  intentsForScope,
+} from "./implementation-scope";
 
 const node: ArchNode = {
   id: "service-id",
@@ -80,5 +85,66 @@ describe("implementationScopePaths", () => {
       independentImplementationTasks([{ ...tasks[0]!, dependsOn: ["b"] }, tasks[1]!]),
     ).toBeNull();
     expect(independentImplementationTasks([{ ...tasks[0]!, files: [] }, tasks[1]!])).toBeNull();
+  });
+});
+
+describe("intentsForScope / formatFacetIntents", () => {
+  const facet: ArchNode = {
+    ...node,
+    id: "reset-facet",
+    level: "facet",
+    kind: "method",
+    parentId: node.id,
+    name: "reset()",
+    file: "shared/agents.ts",
+  };
+  const other: ArchNode = {
+    ...node,
+    id: "other-service",
+    name: "Other service",
+    file: "shared/other.ts",
+  };
+  const snapshot = {
+    ...emptySnapshot(),
+    nodes: { [node.id]: node, [facet.id]: facet, [other.id]: other },
+  };
+  const nodeIntents = [
+    {
+      nodeId: node.id,
+      facetId: facet.id,
+      statement: "reset clears state",
+      invariants: ["idempotent"],
+      acceptance: ["reset twice is safe"],
+    },
+    { nodeId: other.id, statement: "other change", invariants: [], acceptance: [] },
+  ];
+
+  it("keeps every intent when the scope is null (single worker)", () => {
+    expect(intentsForScope(nodeIntents, null, snapshot)).toHaveLength(2);
+  });
+
+  it("filters intents to the worker's file scope", () => {
+    const scope = new Set(["shared/agents.ts"]);
+    const kept = intentsForScope(nodeIntents, scope, snapshot);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.facetId).toBe(facet.id);
+  });
+
+  it("keeps an intent when its node has no file mapping", () => {
+    const unmapped = { nodeId: "no-file-node", statement: "kept", invariants: [], acceptance: [] };
+    const scope = new Set(["shared/agents.ts"]);
+    expect(intentsForScope([unmapped], scope, snapshot)).toHaveLength(1);
+  });
+
+  it("renders a labelled facet block with invariants and acceptance", () => {
+    const text = formatFacetIntents([nodeIntents[0]!], snapshot);
+    expect(text).toContain("Agents service > reset()");
+    expect(text).toContain("reset clears state");
+    expect(text).toContain("invariant: idempotent");
+    expect(text).toContain("acceptance: reset twice is safe");
+  });
+
+  it("returns an empty string for no intents", () => {
+    expect(formatFacetIntents([], snapshot)).toBe("");
   });
 });
