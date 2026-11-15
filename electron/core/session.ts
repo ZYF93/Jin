@@ -1467,6 +1467,7 @@ export class ProjectSession {
           signal: this.abortController.signal,
           temperature: settings.agent.temperature,
           maxTokens: Math.min(settings.agent.maxTokens, 6000),
+          rules: this.agentRules(),
           onUsage: (usage) => this.recordUsage("semantic", provider.model, usage),
         });
         scan = semantic.scan;

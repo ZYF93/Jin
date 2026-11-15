@@ -61,6 +61,8 @@ export interface SemanticPassOptions {
   maxTokens?: number;
   timeoutMs?: number;
   onUsage?: (usage: ProviderTokenUsage) => void;
+  /** AGENTS.md rules (project + global) that the refinement must respect. */
+  rules?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -369,7 +371,10 @@ export async function runSemanticPass(
   );
 
   try {
-    const json = await completeJson(provider, SYSTEM_PROMPT, user, {
+    const system = options.rules?.trim()
+      ? `${SYSTEM_PROMPT}\n\nPROJECT RULES (AGENTS.md; the refinement must respect these):\n${options.rules.trim()}`
+      : SYSTEM_PROMPT;
+    const json = await completeJson(provider, system, user, {
       temperature: options.temperature ?? 0.2,
       maxTokens: options.maxTokens ?? 4000,
       timeoutMs: options.timeoutMs ?? 60_000,

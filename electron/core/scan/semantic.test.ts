@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { ArchNodeDraft } from "../../../shared/ledger/types";
 import type { ScanResult } from "./scanner";
-import { applySemanticRefinement, parseSemanticRefinement, semanticPath } from "./semantic";
+import { afterEach } from "vite-plus/test";
+import {
+  applySemanticRefinement,
+  parseSemanticRefinement,
+  runSemanticPass,
+  semanticPath,
+} from "./semantic";
 
 function moduleNode(path: string, name: string): ArchNodeDraft {
   return {
@@ -198,5 +204,66 @@ describe("applySemanticRefinement", () => {
     });
     expect(applied.refined).toBe(0);
     expect(applied.scan).toBe(scan);
+  });
+});
+
+describe("runSemanticPass AGENTS.md rules", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("injects AGENTS.md rules into the semantic refine system prompt", async () => {
+    let captured: { system?: string; user?: string } = {};
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse((init?.body as string) ?? "{}") as {
+        messages?: Array<{ role: string; content: string }>;
+      };
+      const messages = body.messages ?? [];
+      captured = {
+        system: messages.find((message) => message.role === "system")?.content,
+        user: messages.find((message) => message.role === "user")?.content,
+      };
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ files: [], modules: [] }) } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    await runSemanticPass(
+      scanFixture(),
+      { kind: "openai-compatible", baseUrl: "https://x/v1", model: "m", apiKey: "k" },
+      { rules: "PROJECT RULES (AGENTS.md in the project root):\nUse src/features." },
+    );
+
+    expect(captured.system).toContain("PROJECT RULES");
+    expect(captured.system).toContain("Use src/features.");
+  });
+
+  it("sends the plain system prompt when no rules are given", async () => {
+    let system = "";
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse((init?.body as string) ?? "{}") as {
+        messages?: Array<{ role: string; content: string }>;
+      };
+      system = body.messages?.find((message) => message.role === "system")?.content ?? "";
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ files: [], modules: [] }) } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    await runSemanticPass(scanFixture(), {
+      kind: "openai-compatible",
+      baseUrl: "https://x/v1",
+      model: "m",
+      apiKey: "k",
+    });
+
+    expect(system).not.toContain("PROJECT RULES (AGENTS.md");
   });
 });
