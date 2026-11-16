@@ -18,6 +18,17 @@ The result:
 - **No manual verification.** After writing, Jin runs your project's test / typecheck / lint, feeds failures back for one self-repair pass, and checks the result against the approved architecture.
 - **Reversible.** Every turn is a versioned WAL entry with a Git checkpoint, undoable in one click without touching `HEAD`.
 
+## Highlights
+
+- **Architecture you can see.** The scan produces an L0/L1 map plus method/field facets, refined by a semantic pass that follows your `AGENTS.md`. Review exact intents per module, file, and symbol before anything is written.
+- **AGENTS.md, honored everywhere.** Project-root and global rule files are injected into scanning, planning, and every implementation worker — style, conventions, and language rules (e.g. "always reply in Chinese") are applied to generated intents and code.
+- **Bounded edits.** Implementation is restricted to the approved file whitelist; anything outside it is rejected at the tool layer. Up to three disjoint tasks run as isolated sub-agents.
+- **Verify, repair, conform.** Jin runs your project's own test / typecheck / lint, feeds failures back for one bounded self-repair pass, then checks the code against the approved architecture.
+- **Full LLM visibility.** Streaming thinking and tool-call status, expandable agent activity, and JSONL request/response logs you can open from Settings.
+- **One-click undo.** Every turn is a versioned WAL entry with a Git checkpoint; the working tree is restored without moving `HEAD`, and the composer is refilled with your original message.
+- **MCP, web, and images.** Connect MCP servers, use built-in grep/glob/web-fetch/web-search tools, and paste screenshots for vision-capable models.
+- **Long-chat compaction.** CJK-aware token accounting; auto mode trims old turns locally first and only asks the model for a summary when needed.
+
 ## How it compares
 
 | | Core idea | Strength | Where Jin differs |
@@ -39,6 +50,10 @@ A full walkthrough of the differences is in [docs/overview.md](docs/overview.md)
 - Searches existing code for reuse before writing, then rescans and reports architecture drift after implementation.
 - Keeps the shared architecture history in `.jin/wal.jsonl`, so it can be reviewed and merged with normal Git workflows.
 - Connects to OpenAI Chat/Responses, Anthropic Messages, Google Gemini, Ollama, and custom gateways. Model lists can be refreshed from the provider, a built-in preset table fills in context window and price, and a custom model ID can be entered if it is not listed. Optional web-search endpoint and per-provider custom request headers are supported.
+- Follows `AGENTS.md`: a project-root file and a global file (editable in Settings) are injected into the semantic scan, the planner, and every implementation worker. Facet-level intents are judged by the model and validated against LSP facts, so conventions and language rules reach the symbol level.
+- Connects to MCP servers; their tools are exposed to the agent alongside Jin's built-in grep / glob / todo / web-fetch / web-search tools, and all tool calls pass through configurable hooks.
+- Accepts images in chat (paste or attach) for vision-capable models, in both planning and implementation.
+- Keeps long chats usable with automatic context compaction: a local trim mode needs no LLM, and auto mode only summarizes with the model when trimming cannot fit the budget.
 - Includes Git branch switching, change staging, commits, history, and remote operations in the desktop app.
 
 ## Install
@@ -79,6 +94,8 @@ Provider:   Ollama
 Base URL:   http://localhost:11434
 Model:      qwen3:8b
 ```
+
+Anthropic (Messages API) and Google Gemini are supported as first-class protocols: pick the protocol, endpoint, and model, and Jin maps chat, tool calls, images, and usage accordingly. See [Providers & models](docs/providers.md).
 
 Provider endpoints and available models differ. If refresh cannot discover a model, enter its exact ID in the model field. Jin stores provider credentials using the operating system's secure storage when available.
 
@@ -144,6 +161,7 @@ The initialization command is idempotent. It creates the project files if needed
 | [Overview: strengths & limits](docs/overview.md) | When Jin fits, when it does not, and how it compares to Codex/OpenCode/Claude Code |
 | [Providers & models](docs/providers.md) | All supported protocols, 2026 model presets, custom headers, search endpoint |
 | [WAL format](docs/wal.md) | The `.jin/wal.jsonl` architecture ledger, records, versions, and the Git merge driver |
+| [AGENTS.md rules](docs/agents-md.md) | The two rule layers, where they are injected, and how language rules reach generated intents |
 
 ## Build from source
 

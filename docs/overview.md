@@ -28,6 +28,22 @@ Everything after the gate is bounded and verifiable; everything before it is *in
 - **Correctness is auto-checked.** After writing, Jin runs your project's own test / typecheck / lint scripts and feeds failures back for one bounded self-repair pass, then rescans and verifies the approved architecture actually materialized.
 - **It is reversible.** Every turn is a WAL version with a Git checkpoint; undo restores the working tree without moving `HEAD`.
 
+## Built-in agent capabilities
+
+Beyond the gate itself, Jin ships a full agent toolset comparable to Codex/OpenCode/Claude Code:
+
+| Capability | What it does |
+| --- | --- |
+| **AGENTS.md rules** | Project + global rule files injected into scan, planning, and every worker ([details](agents-md.md)) |
+| **Built-in tools** | grep, glob, todo list, view image, run checks — all wrapped by configurable hooks |
+| **MCP servers** | Connect Model Context Protocol servers; their tools appear alongside the built-ins |
+| **Web access** | Fetch pages and search the web for documentation lookups (SSRF-guarded) |
+| **Image input** | Paste or attach screenshots; vision models receive them in planning and implementation |
+| **Context compaction** | CJK-aware token accounting; auto mode trims locally first, LLM summary only as a fallback |
+| **Model protocols** | OpenAI Chat + Responses, Anthropic Messages, Gemini, Ollama — with images and tool calls mapped per protocol |
+| **LLM visibility** | Streaming thinking/tool-call status, expandable agent activity, JSONL logs in Settings |
+| **Undo** | Versioned WAL entries with Git checkpoints; per-message undo refills the composer |
+
 ## How it compares
 
 | | Core idea | Strong at | Where Jin differs |

@@ -6,5 +6,6 @@
 | [Getting started](getting-started.md) | [快速上手](getting-started.zh-CN.md) | 首次运行、配置 Provider、完成第一个被批准的变更 |
 | [Providers & models](providers.md) | [Provider 与模型](providers.zh-CN.md) | 支持的协议、2026 模型预设、自定义请求头、搜索端点 |
 | [WAL format](wal.md) | [WAL 格式](wal.zh-CN.md) | `.jin/wal.jsonl` 架构账本、记录、版本与 Git 合并驱动 |
+| [AGENTS.md rules](agents-md.md) | [AGENTS.md 规则](agents-md.zh-CN.md) | 两层规则文件、注入位置（扫描/规划/实现），以及语言规则如何落实到符号级意图 |
 
 核心设计一句话：**先审架构，再写代码**——你审的是意图和影响面，正确性交给自动检查 + 失败自修 + 架构一致性校验兜底。

@@ -80,7 +80,7 @@ export class RagService {
         text: doc.text,
         nodeId: doc.nodeId,
         tokens: tokenMap(
-          `${doc.path}\n${doc.title}\n${doc.symbols}\n${doc.responsibility}\n${doc.text}`,
+          `${doc.path}\n${doc.title}\n${doc.symbols}\n${doc.responsibility}\n${doc.text}\n${doc.architectureText}`,
         ),
         vector: doc.vector,
         architectureText: doc.architectureText,
@@ -102,10 +102,16 @@ export class RagService {
   update(root: string, scan: ScanResult, snapshot: ArchSnapshot | null): void {
     this.hydrate();
     const previous = new Map(this.docs.map((doc) => [doc.path, doc]));
-    const fileToNode = new Map<string, ArchSnapshot["nodes"][string]>();
+    // Every architecture node that lives in a file, including facet members.
+    // Facet responsibilities carry symbol-level intent, so they belong in the
+    // retrieval index alongside the L1 node's own responsibility.
+    const nodesByFile = new Map<string, ArchSnapshot["nodes"][string][]>();
     if (snapshot) {
       for (const node of Object.values(snapshot.nodes)) {
-        if (node.file && !fileToNode.has(node.file)) fileToNode.set(node.file, node);
+        if (!node.file) continue;
+        const bucket = nodesByFile.get(node.file);
+        if (bucket) bucket.push(node);
+        else nodesByFile.set(node.file, [node]);
       }
     }
 
@@ -124,13 +130,18 @@ export class RagService {
       for (const node of Object.values(snapshot.nodes)) {
         if (node.parentId) link(node.id, node.parentId);
       }
-      for (const [file, node] of fileToNode) this.pathToNodeId.set(file, node.id);
+      for (const [file, nodes] of nodesByFile) {
+        const primary = nodes.find((candidate) => candidate.level !== "facet") ?? nodes[0];
+        if (primary) this.pathToNodeId.set(file, primary.id);
+      }
     }
 
     const now = new Date().toISOString();
     const changed: RagDoc[] = [];
     this.docs = scan.files.map((file) => {
-      const node = fileToNode.get(file.path) ?? null;
+      const fileNodes = nodesByFile.get(file.path) ?? [];
+      const node =
+        fileNodes.find((candidate) => candidate.level !== "facet") ?? fileNodes[0] ?? null;
       const cached = previous.get(file.path);
       let sourceMtimeMs = 0;
       let sourceSize = file.bytes;
@@ -171,35 +182,41 @@ export class RagService {
           parent = parent.parentId && snapshot ? snapshot.nodes[parent.parentId] : null;
           depth += 1;
         }
+        for (const facet of fileNodes) {
+          if (facet === node || facet.level !== "facet") continue;
+          if (architectureParts.length >= 80) break;
+          architectureParts.push(facet.name, facet.responsibility);
+        }
       }
       const nodeId = node?.id ?? null;
       const architectureText = architectureParts.join("\n");
-      const doc: RagDoc = cached && sourceUnchanged
-        ? {
-            ...cached,
-            nodeId,
-            architectureText,
-            sourceMtimeMs,
-            sourceSize,
-          }
-        : (() => {
-            const tokens = tokenMap(
-              `${file.path}\n${file.title}\n${file.exports.join(" ")}\n${file.responsibility}\n${text}`,
-            );
-            return {
-              path: file.path,
-              title: file.title,
-              symbols,
-              responsibility: file.responsibility,
-              text,
+      const doc: RagDoc =
+        cached && sourceUnchanged
+          ? {
+              ...cached,
               nodeId,
-              tokens,
-              vector: vectorize(tokens),
               architectureText,
               sourceMtimeMs,
               sourceSize,
-            };
-          })();
+            }
+          : (() => {
+              const tokens = tokenMap(
+                `${file.path}\n${file.title}\n${file.exports.join(" ")}\n${file.responsibility}\n${text}\n${architectureText}`,
+              );
+              return {
+                path: file.path,
+                title: file.title,
+                symbols,
+                responsibility: file.responsibility,
+                text,
+                nodeId,
+                tokens,
+                vector: vectorize(tokens),
+                architectureText,
+                sourceMtimeMs,
+                sourceSize,
+              };
+            })();
       if (
         !sourceUnchanged ||
         cached?.nodeId !== doc.nodeId ||

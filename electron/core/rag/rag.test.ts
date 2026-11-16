@@ -88,7 +88,7 @@ describe("RagService", () => {
         "  return lines.reduce((sum, line) => sum + line, 0);",
         "}",
       ].join("\n"),
-      "color.ts": "/** 主题颜色。 */\nexport const accent = \"cyan\";\n",
+      "color.ts": '/** 主题颜色。 */\nexport const accent = "cyan";\n',
     });
     const service = new RagService();
     service.update(root, scanProject(root, CONFIG), null);
@@ -100,7 +100,8 @@ describe("RagService", () => {
   it("expands one hop through architecture edges", () => {
     const root = fixture({
       "invoice.ts": "/** Invoice total helper. */\nexport function invoiceTotal() { return 0; }\n",
-      "report.ts": "/** Exporter for downstream reporting. */\nexport function exportReport() { return 0; }\n",
+      "report.ts":
+        "/** Exporter for downstream reporting. */\nexport function exportReport() { return 0; }\n",
     });
     const snapshot: ArchSnapshot = {
       ...emptySnapshot(),
@@ -127,6 +128,36 @@ describe("RagService", () => {
     expect(results.some((candidate) => candidate.path === "src/report.ts")).toBe(true);
   });
 
+  it("indexes facet member responsibilities for retrieval", () => {
+    const root = fixture({
+      "ledger.ts": "/** Journal primitives. */\nexport function record() { return 0; }\n",
+      "report.ts": "/** Reporting export. */\nexport function build() { return 0; }\n",
+    });
+    const ledger = archNode("ledger", "Ledger", "src/ledger.ts", "Journal primitives.");
+    const facet: ArchNode = {
+      ...archNode(
+        "facet-post",
+        "post",
+        "src/ledger.ts",
+        "Posts an entry and flips the balanced flag.",
+      ),
+      level: "facet",
+      kind: "method",
+      parentId: "ledger",
+    };
+    const report = archNode("report", "Report", "src/report.ts", "Reporting export.");
+    const snapshot: ArchSnapshot = {
+      ...emptySnapshot(),
+      nodes: Object.fromEntries([ledger, facet, report].map((item) => [item.id, item])),
+      edges: {},
+    };
+    const service = new RagService();
+    service.update(root, scanProject(root, CONFIG), snapshot);
+
+    const results = service.search("balanced flag", 3);
+    expect(results[0]?.path).toBe("src/ledger.ts");
+  });
+
   it("persists text, vectors, and Chinese FTS tokens across service restarts", () => {
     const root = fixture({
       "billing.ts": [
@@ -135,7 +166,7 @@ describe("RagService", () => {
         "  return lines.reduce((sum, line) => sum + line, 0);",
         "}",
       ].join("\n"),
-      "theme.ts": "/** Resolve the active color theme. */\nexport const accent = \"cyan\";\n",
+      "theme.ts": '/** Resolve the active color theme. */\nexport const accent = "cyan";\n',
     });
     const db = openSqlite(join(root, "index.db"));
     try {

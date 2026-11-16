@@ -2,6 +2,7 @@ import { hostname, userInfo } from "node:os";
 import { safeStorage } from "electron";
 import { isLanguage } from "../../../shared/i18n";
 import { isProviderConfigured } from "../../../shared/provider";
+import { RELEASES_FEED_URL } from "../../../shared/links";
 import type {
   AppSettings,
   Language,
@@ -107,7 +108,7 @@ function defaults(): StoredSettings {
     },
     updates: {
       autoCheck: true,
-      feedUrl: "",
+      feedUrl: RELEASES_FEED_URL,
     },
   };
 }
@@ -268,7 +269,10 @@ function normalize(raw: unknown): StoredSettings {
     updates: {
       autoCheck:
         typeof updates.autoCheck === "boolean" ? updates.autoCheck : fallback.updates.autoCheck,
-      feedUrl: typeof updates.feedUrl === "string" ? updates.feedUrl.trim() : "",
+      feedUrl:
+        typeof updates.feedUrl === "string" && updates.feedUrl.trim()
+          ? updates.feedUrl.trim()
+          : fallback.updates.feedUrl,
     },
   };
 }

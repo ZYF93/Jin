@@ -120,6 +120,7 @@ describe("parseSemanticRefinement", () => {
         responsibility: "Charges cards and records the result.",
         domain: "billing",
         symbols: ["charge", "refund"],
+        members: [],
       },
     ]);
     expect(refinement.modules).toEqual([
@@ -265,5 +266,80 @@ describe("runSemanticPass AGENTS.md rules", () => {
     });
 
     expect(system).not.toContain("PROJECT RULES (AGENTS.md");
+  });
+});
+
+describe("member (facet) refinements", () => {
+  function facetNode(): ArchNodeDraft {
+    return {
+      id: "file-billing-facet-refund",
+      level: "facet",
+      kind: "method",
+      parentId: "file-billing",
+      name: "refund",
+      path: "src/billing.ts",
+      file: "src/billing.ts",
+      symbol: "#refund",
+      responsibility: "method refund on billing.",
+      intentId: null,
+      status: "active",
+      metadata: { origin: "scan", scanned: true },
+    };
+  }
+
+  it("accepts member responsibilities whose names exist in the scan", () => {
+    const refinement = parseSemanticRefinement(
+      {
+        files: [
+          {
+            path: "src/billing.ts",
+            members: [
+              { name: "refund", responsibility: "Issues a refund against a completed charge." },
+            ],
+          },
+        ],
+      },
+      scanFixture(),
+    );
+    expect(refinement.files[0]?.members).toEqual([
+      { name: "refund", responsibility: "Issues a refund against a completed charge." },
+    ]);
+  });
+
+  it("rejects member names not confirmed by the scan", () => {
+    const refinement = parseSemanticRefinement(
+      {
+        files: [
+          {
+            path: "src/billing.ts",
+            responsibility: "Charges cards and records the result.",
+            members: [{ name: "deleteEverything", responsibility: "Not in the scan." }],
+          },
+        ],
+      },
+      scanFixture(),
+    );
+    expect(refinement.files[0]?.members).toEqual([]);
+  });
+
+  it("applies member responsibilities to facet nodes", () => {
+    const scan = scanFixture();
+    const withFacet: ScanResult = { ...scan, nodes: [...scan.nodes, facetNode()] };
+    const applied = applySemanticRefinement(withFacet, {
+      files: [
+        {
+          path: "src/billing.ts",
+          symbols: [],
+          members: [
+            { name: "refund", responsibility: "Issues a refund against a completed charge." },
+          ],
+        },
+      ],
+      modules: [],
+      warnings: [],
+    });
+    const facet = applied.scan.nodes.find((node) => node.id === "file-billing-facet-refund");
+    expect(facet?.responsibility).toBe("Issues a refund against a completed charge.");
+    expect(facet?.metadata.semantic).toBe(true);
   });
 });

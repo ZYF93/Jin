@@ -131,6 +131,22 @@ describe("scanNodeIntents", () => {
     ]);
     expect(intents.every((intent) => intent.invariants.length === 0)).toBe(true);
   });
+
+  it("creates facet intents under the owning L1 with a facetId", () => {
+    const facet = node("keep-method", "facet", "method", "keep", "keep", "src/keep.ts", {
+      responsibility: "保留方法，处理保留策略。",
+      symbol: "#keep",
+    });
+    const intents = scanNodeIntents([
+      node("layer", "L0", "layer", null, "src", "src"),
+      node("keep", "L1", "function", "layer", "keep", "src/keep.ts"),
+      facet,
+    ]);
+    const facetIntent = intents.find((intent) => intent.facetId === facet.id);
+    expect(facetIntent?.nodeId).toBe("keep");
+    expect(facetIntent?.statement).toBe("保留方法，处理保留策略。");
+    expect(intents.some((intent) => intent.nodeId === "keep" && !intent.facetId)).toBe(true);
+  });
 });
 
 describe("diffScanToOps", () => {

@@ -28,6 +28,22 @@ Jin 是一个桌面 coding agent，最关键的设计选择是**架构优先（a
 - **正确性自动检查。** 写完后跑项目自己的 test / typecheck / lint，失败回灌自修一轮，再重扫确认批准的架构真的落成。
 - **可逆。** 每轮是一个带 Git checkpoint 的 WAL 版本；一键撤销、不动 `HEAD`。
 
+## 内置代理能力
+
+除了架构闸门本身，Jin 还带有一套与 Codex/OpenCode/Claude Code 对标的完整代理工具集：
+
+| 能力 | 说明 |
+| --- | --- |
+| **AGENTS.md 规则** | 项目 + 全局规则文件注入扫描、规划和每个 worker（[详情](agents-md.zh-CN.md)） |
+| **内置工具** | grep、glob、待办列表、查看图片、运行检查——全部经过可配置 hooks |
+| **MCP 服务器** | 连接 Model Context Protocol 服务器，其工具与内置工具并列暴露给代理 |
+| **联网** | 抓取网页与搜索网络用于查文档（带 SSRF 防护） |
+| **图片输入** | 粘贴或附加截图，规划与实现阶段都会交给视觉模型 |
+| **上下文压缩** | CJK 感知 token 估算；auto 模式先本地裁剪，仅在必要时才让模型总结 |
+| **模型协议** | OpenAI Chat + Responses、Anthropic Messages、Gemini、Ollama——图片与工具调用按协议逐一映射 |
+| **LLM 可见性** | 流式思考/工具调用状态、可展开的代理活动、设置中的 JSONL 日志 |
+| **撤销** | 带 Git checkpoint 的 WAL 版本；按消息撤销会把原文填回输入框 |
+
 ## 它和别家怎么比
 
 | | 核心思路 | 强项 | Jin 的不同 |

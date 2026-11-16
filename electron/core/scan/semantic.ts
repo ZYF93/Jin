@@ -28,6 +28,12 @@ const MAX_RESPONSIBILITY = 280;
 const MAX_DOMAIN = 48;
 const MAX_SYMBOLS = 24;
 const MAX_FILES = 160;
+const MAX_MEMBERS_PER_FILE = 10;
+
+export interface SemanticMemberRefinement {
+  name: string;
+  responsibility: string;
+}
 
 export interface SemanticFileRefinement {
   path: string;
@@ -35,6 +41,8 @@ export interface SemanticFileRefinement {
   responsibility?: string;
   domain?: string;
   symbols: string[];
+  /** LLM-judged responsibilities for confirmed members (facet intents). */
+  members: SemanticMemberRefinement[];
 }
 
 export interface SemanticModuleRefinement {
@@ -141,13 +149,33 @@ export function parseSemanticRefinement(value: unknown, scan: ScanResult): Seman
       }
     }
 
-    if (!kind && !responsibility && !domain && symbols.length === 0) continue;
+    const members: SemanticMemberRefinement[] = [];
+    if (Array.isArray(raw.members)) {
+      for (const rawMember of raw.members) {
+        if (!isRecord(rawMember)) continue;
+        const name = typeof rawMember.name === "string" ? rawMember.name.trim() : "";
+        const memberResponsibility = cleanText(rawMember.responsibility, MAX_RESPONSIBILITY);
+        if (!name || !memberResponsibility) continue;
+        if (!known.has(name)) {
+          rejectedSymbols += 1;
+          continue;
+        }
+        if (members.some((member) => member.name === name)) continue;
+        members.push({ name, responsibility: memberResponsibility });
+        if (members.length >= MAX_MEMBERS_PER_FILE) break;
+      }
+    }
+
+    if (!kind && !responsibility && !domain && symbols.length === 0 && members.length === 0) {
+      continue;
+    }
     refined.set(path, {
       path,
       ...(kind ? { kind } : {}),
       ...(responsibility ? { responsibility } : {}),
       ...(domain ? { domain } : {}),
       symbols,
+      members,
     });
   }
 
@@ -249,6 +277,17 @@ export function applySemanticRefinement(
         };
       }
     }
+    if (node.level === "facet" && node.path) {
+      const match = byPath.get(node.path);
+      const member = match?.members.find((item) => item.name === node.name);
+      if (!member) return node;
+      refined += 1;
+      return {
+        ...node,
+        responsibility: member.responsibility,
+        metadata: { ...node.metadata, semantic: true },
+      };
+    }
     if (node.level === "L1" && node.file) {
       const match = byPath.get(node.file);
       if (!match) return node;
@@ -335,6 +374,7 @@ const SYSTEM_PROMPT = `You are Jin's semantic architecture pass. You do not writ
 For each source file in the input, refine its architecture metadata:
 - kind: one of component, hook, entity, service, repository, route, store, type, module, function, table, schema, config. Use module for ordinary files that are not clearly another kind; function is only for files whose primary role is reusable function behavior.
 - responsibility: one concrete sentence (at most 280 characters) about behavior, not a restatement of the filename.
+- members: for each listed member (method/field/property) of a file, one concrete sentence (at most 280 characters) describing what that member does; only include members whose names appear in the file's exports or members list.
 - domain: a short lowercase product domain shared by related files (for example billing, editor-shell, auth); do not use src or layer names.
 - symbols: optional names that already appear in the file's exports or members; never guess a symbol.
 For each listed source directory, return its responsibility: describe the product or technical capability its child files jointly provide, not that it contains files or was scanned.
@@ -344,7 +384,7 @@ Rules:
 - Group related files under the same domain tag so L0 modules gain a semantic summary.
 - Do not output Markdown or commentary.
 Return strict JSON only:
-{"files":[{"path":"src/example.ts","kind":"service","responsibility":"Charges a saved payment method and records the result.","domain":"billing","symbols":["charge"]}],"modules":[{"path":"src/billing","responsibility":"Coordinates payment creation, refunds, and invoice state.","domain":"billing"}]}`;
+{"files":[{"path":"src/example.ts","kind":"service","responsibility":"Charges a saved payment method and records the result.","domain":"billing","symbols":["charge"],"members":[{"name":"charge","responsibility":"Validates the saved card, creates the charge, and records the ledger entry."}]}],"modules":[{"path":"src/billing","responsibility":"Coordinates payment creation, refunds, and invoice state.","domain":"billing"}]}`;
 
 /**
  * Run one bounded semantic pass over a structural scan. Failure is non-fatal:

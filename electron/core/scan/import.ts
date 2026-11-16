@@ -30,16 +30,23 @@ export interface ScanImportResult {
   removedEdges: number;
 }
 
-/** Give imported architecture nodes their source-derived purpose, separate from the scan task. */
+/**
+ * Give imported architecture nodes their source-derived purpose, separate from
+ * the scan task. Facet methods/fields are included so the review dialog can
+ * show what each facet under an L1 node is meant to do; system and external
+ * packages carry no per-node intent.
+ */
 export function scanNodeIntents(nodes: readonly ArchNodeDraft[]): Intent["nodeIntents"] {
   return nodes
     .filter(
       (node) =>
         node.level === "L1" ||
+        node.level === "facet" ||
         (node.level === "L0" && node.kind !== "system" && node.kind !== "external"),
     )
     .map((node) => ({
-      nodeId: node.id,
+      nodeId: node.parentId && node.level === "facet" ? node.parentId : node.id,
+      facetId: node.level === "facet" ? node.id : undefined,
       statement: node.responsibility,
       invariants: [],
       acceptance: [],

@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MenuAction } from "../shared/ipc";
 import { translate, type MessageKey, type TranslationParams } from "../shared/i18n";
+import { RELEASES_FEED_URL, RELEASES_URL } from "../shared/links";
 import {
   IPC_CHANNELS,
   type AppSettings,
@@ -388,20 +389,25 @@ function sendMenu(action: MenuAction, path?: string): void {
   sendEvent(event);
 }
 
-function showAbout(): void {
+async function showAbout(): Promise<void> {
   const detail = t("dialog.aboutDetail", {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node,
   });
-  void showMessage({
+  const result = await showMessage({
     type: "info",
     title: t("dialog.aboutTitle"),
     message: t("dialog.aboutMessage", { version: app.getVersion() }),
     detail,
-    buttons: [t("dialog.ok")],
+    buttons: [t("dialog.ok"), t("menu.releases")],
+    defaultId: 0,
+    cancelId: 0,
     noLink: true,
   });
+  if (result.response === 1) {
+    void shell.openExternal(RELEASES_URL);
+  }
 }
 
 async function installDriverFromMenu(): Promise<void> {
@@ -597,11 +603,17 @@ function buildApplicationMenu(): Menu {
   template.push({
     label: t("menu.help"),
     submenu: [
-      ...(isMac ? [] : ([{ label: t("menu.about"), click: showAbout }] as const)),
+      ...(isMac ? [] : ([{ label: t("menu.about"), click: () => void showAbout() }] as const)),
       {
-        label: t("menu.wal"),
+        label: t("menu.releases"),
         click: () => {
-          void shell.openExternal("https://github.com/");
+          void shell.openExternal(RELEASES_URL);
+        },
+      },
+      {
+        label: t("menu.website"),
+        click: () => {
+          void shell.openExternal(RELEASES_URL.replace(/\/releases$/, ""));
         },
       },
     ],
@@ -730,7 +742,7 @@ function registerIpcHandlers(): void {
     if (updateService) {
       updateService.configure({
         autoCheck: settings.updates.autoCheck,
-        feedUrl: settings.updates.feedUrl,
+        feedUrl: settings.updates.feedUrl || RELEASES_FEED_URL,
       });
     }
     rebuildApplicationMenu();
@@ -1095,7 +1107,7 @@ function initializeApplication(): void {
   updateService = new UpdateService({
     currentVersion: app.getVersion(),
     packaged: app.isPackaged,
-    feedUrl: settings.updates.feedUrl,
+    feedUrl: settings.updates.feedUrl || RELEASES_FEED_URL,
     envFeedUrl: process.env.JIN_UPDATE_FEED_URL,
     autoCheck: settings.updates.autoCheck,
     devConfigPath: join(app.getPath("userData"), "dev-app-update.yml"),
