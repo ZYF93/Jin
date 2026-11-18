@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   Bot,
   Brain,
   CheckCircle2,
+  Clock,
   Copy,
   Check,
   GitPullRequest,
@@ -12,10 +13,10 @@ import {
   ScanSearch,
   ShieldCheck,
   Sparkles,
-  Square,
   Undo2,
   User,
   Wrench,
+  X,
   XCircle,
 } from "lucide-react";
 import type { ChatMessage } from "../../shared/ipc";
@@ -63,18 +64,28 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const proposal = useJin((state) => state.app?.proposal ?? null);
   const setReviewOpen = useJin((state) => state.setReviewOpen);
   const busy = useJin((state) => state.busy);
-  const undoImplementation = useJin((state) => state.undoImplementation);
+  const deleteMessage = useJin((state) => state.deleteMessage);
   const setComposerSeed = useJin((state) => state.setComposerSeed);
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const current =
     proposal && message.proposalId && proposal.id === message.proposalId ? proposal : null;
   const [copied, setCopied] = useState(false);
+  // User rows and assistant text/implementation/error rows can be recalled:
+  // the history rewinds to just before them, so stopped replies and failed
+  // turns are recoverable too. Proposal and scan rows go through their own
+  // review/merge flows instead.
   const undoAvailable =
-    !busy && !isSystem && (isUser || message.kind === "implementation" || message.kind === "error");
+    !busy &&
+    !isSystem &&
+    (isUser ||
+      message.kind === "text" ||
+      message.kind === "implementation" ||
+      message.kind === "error");
   const doUndo = async (): Promise<void> => {
-    const versionId = message.proposalId ?? undefined;
-    await undoImplementation(versionId);
+    // Recall the message from the visible history; the store resolves the
+    // turn's version and restores its checkpoint when one exists.
+    await deleteMessage(message.id);
     if (isUser && message.content.trim()) setComposerSeed(message.content);
   };
   const copyMessage = async (): Promise<void> => {
@@ -244,7 +255,6 @@ function StreamBubble() {
 function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
   const t = useT();
   const agent = useJin((state) => state.app?.agent);
-  const cancelAgent = useJin((state) => state.cancelAgent);
   if (!agent || agent.phase === "idle" || (agent.phase === "error" && suppressError)) {
     return null;
   }
@@ -306,15 +316,6 @@ function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
               </details>
             ) : null}
           </div>
-          {working ? (
-            <button
-              className="icon-btn h-6 w-6 shrink-0"
-              onClick={() => void cancelAgent()}
-              title={t("chat.cancelAgent")}
-            >
-              <Square size={10} />
-            </button>
-          ) : null}
         </div>
         {working ? (
           <ol className="mt-2 grid grid-cols-4 gap-1" aria-label={t("approvalFlow.title")}>
@@ -357,11 +358,21 @@ function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
 export function ChatPanel() {
   const t = useT();
   const app = useJin((state) => state.app);
-  const busy = useJin((state) => state.busy);
   const sendMessage = useJin((state) => state.sendMessage);
   const openSettings = useJin((state) => state.openSettings);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** Follow new content while the user is at the bottom of the transcript. */
   const stickToBottom = useRef(true);
+  /**
+   * Scroll the transcript to the bottom. The effect below is re-invoked on
+   * every stream delta; the browser coalesces programmatic scrolls per frame,
+   * and sending a message forces the view back to the newest entry.
+   */
+  const scrollToBottom = useCallback((): void => {
+    const container = scrollRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+  }, []);
   const messages = app?.messages ?? [];
   const stream = useJin((state) => state.stream);
   const agent = app?.agent;
@@ -375,15 +386,23 @@ export function ChatPanel() {
     agent?.phase === "error" &&
     latestMessage?.kind === "error" &&
     latestMessage.content.includes(agent.message);
-  const disabled = !app?.project || Boolean(busy) || working || reviewing || !configured;
+  // The composer stays usable while the agent works: extra turns queue and
+  // flush when it settles (or right after Stop). Only project/review/provider
+  // problems close the input.
+  const disabled = !app?.project || reviewing || !configured;
+  const queue = useJin((state) => state.queue);
+  const clearQueue = useJin((state) => state.clearQueue);
+  const cancelAgent = useJin((state) => state.cancelAgent);
 
+  // Follow new content while the user is pinned to the bottom. The effect runs
+  // after each DOM update with a fresh scrollHeight, and the browser coalesces
+  // the programmatic scroll per frame — so this stays smooth without a timer
+  // that rapid stream deltas would keep cancelling.
+  const forceScrollToBottom = useRef(false);
   useEffect(() => {
-    if (!stickToBottom.current) return;
-    const timer = window.setTimeout(() => {
-      const container = scrollRef.current;
-      if (container) container.scrollTop = container.scrollHeight;
-    }, 30);
-    return () => window.clearTimeout(timer);
+    if (!stickToBottom.current && !forceScrollToBottom.current) return;
+    forceScrollToBottom.current = false;
+    scrollToBottom();
   }, [
     messages.length,
     agent?.phase,
@@ -392,12 +411,20 @@ export function ChatPanel() {
     stream?.reasoning.length,
     stream?.activity.length,
     stream?.label,
+    scrollToBottom,
   ]);
 
   const submit = (request: string, images?: string[]): void => {
     if ((!request && !images?.length) || disabled) return;
     stickToBottom.current = true;
+    forceScrollToBottom.current = true;
     void sendMessage(request, images);
+  };
+
+  const stopAgent = (): void => {
+    if (!working) return;
+    // Stopping settles the agent; any queued turn then flushes automatically.
+    void cancelAgent();
   };
 
   return (
@@ -432,8 +459,10 @@ export function ChatPanel() {
         className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-2.5 py-3"
         onScroll={(event) => {
           const element = event.currentTarget;
+          // Treat "near the bottom" as within half a bubble so programmatic
+          // scrolls keep the stick flag armed; user scrolls up disarm it.
           stickToBottom.current =
-            element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+            element.scrollHeight - element.scrollTop - element.clientHeight < 96;
         }}
       >
         {messages.length === 0 ? (
@@ -474,7 +503,29 @@ export function ChatPanel() {
             </button>
           </div>
         ) : null}
-        <ChatComposer disabled={disabled} reviewing={reviewing} working={working} onSend={submit} />
+        {queue.length > 0 ? (
+          <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] px-2 py-1.5 text-[8.5px] text-[var(--muted)]">
+            <Clock size={10} className="shrink-0 text-[var(--accent)]" />
+            <span className="min-w-0 flex-1 truncate">
+              {t("chat.queued", { count: queue.length })}
+            </span>
+            <button
+              className="shrink-0 text-[var(--faint)] transition-colors hover:text-[var(--danger)]"
+              onClick={clearQueue}
+              title={t("chat.clearQueue")}
+              aria-label={t("chat.clearQueue")}
+            >
+              <X size={10} />
+            </button>
+          </div>
+        ) : null}
+        <ChatComposer
+          disabled={disabled}
+          reviewing={reviewing}
+          working={working}
+          onSend={submit}
+          onStop={stopAgent}
+        />
       </div>
     </aside>
   );

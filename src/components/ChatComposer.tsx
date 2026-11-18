@@ -8,6 +8,7 @@ import {
   Image as ImageIcon,
   Send,
   Sparkles,
+  Square,
   X,
 } from "lucide-react";
 import type { FileNode, ProviderModel, ReasoningEffort } from "../../shared/ipc";
@@ -302,11 +303,13 @@ export function ChatComposer({
   reviewing,
   working,
   onSend,
+  onStop,
 }: {
   disabled: boolean;
   reviewing: boolean;
   working: boolean;
   onSend: (text: string, images?: string[]) => void;
+  onStop: () => void;
 }) {
   const t = useT();
   const app = useJin((state) => state.app);
@@ -625,13 +628,17 @@ export function ChatComposer({
             <ImageIcon size={13} />
           </button>
           <button
-            className="btn btn-primary ml-auto h-7 w-7 shrink-0 p-0"
-            disabled={disabled || (!text.trim() && attachments.length === 0)}
-            onClick={() => void submit()}
-            title={t("chat.send")}
-            aria-label={t("chat.sendMessage")}
+            className={
+              working
+                ? "btn ml-auto h-7 w-7 shrink-0 border-rose-400/40 bg-rose-400/10 p-0 text-[var(--danger)] transition-colors hover:bg-rose-400/20"
+                : "btn btn-primary ml-auto h-7 w-7 shrink-0 p-0"
+            }
+            disabled={working ? disabled : disabled || (!text.trim() && attachments.length === 0)}
+            onClick={() => (working ? onStop() : void submit())}
+            title={working ? t("chat.cancelAgent") : t("chat.send")}
+            aria-label={working ? t("chat.cancelAgent") : t("chat.send")}
           >
-            {busy ? <Spinner size={12} /> : <Send size={12} />}
+            {working ? <Square size={12} /> : busy ? <Spinner size={12} /> : <Send size={12} />}
           </button>
         </div>
       </div>

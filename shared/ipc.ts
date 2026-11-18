@@ -588,6 +588,7 @@ export type JinEvent =
   | { type: "stream"; stream: ChatStream | null }
   | { type: "update"; update: UpdateState }
   | { type: "menu"; action: MenuAction; path?: string }
+  | { type: "chat-delete"; messageId: string }
   | { type: "error"; message: string };
 
 /**
@@ -628,6 +629,7 @@ export const IPC_CHANNELS = {
   listModels: "jin:list-models",
   mcpCall: "jin:mcp-call",
   undoImplementation: "jin:undo-implementation",
+  deleteChatMessage: "jin:delete-chat-message",
   gitStatus: "jin:git-status",
   gitBranches: "jin:git-branches",
   gitCheckout: "jin:git-checkout",
@@ -690,6 +692,11 @@ export interface JinBridge {
   listModels(request: ProviderModelRequest): Promise<ProviderModelCatalog>;
   mcpCall(server: string, tool: string, args?: Record<string, unknown>): Promise<McpCallResult>;
   undoImplementation(versionId?: string): Promise<AppState>;
+  /**
+   * Recall a chat message: drop it from the visible history and rewind the
+   * planner conversation to the turn before it. No version or WAL is touched.
+   */
+  deleteChatMessage(id: string): Promise<AppState>;
   gitStatus(): Promise<GitStatus>;
   gitBranches(): Promise<GitBranchList>;
   /** Switch branches; remote names create a local tracking branch on first use. */

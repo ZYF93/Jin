@@ -85,6 +85,8 @@ const bridge: JinBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.mcpCall, server, tool, args) as Promise<McpCallResult>,
   undoImplementation: (versionId?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.undoImplementation, versionId) as Promise<AppState>,
+  deleteChatMessage: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.deleteChatMessage, id) as Promise<AppState>,
   gitStatus: () => ipcRenderer.invoke(IPC_CHANNELS.gitStatus) as Promise<GitStatus>,
   gitBranches: () => ipcRenderer.invoke(IPC_CHANNELS.gitBranches) as Promise<GitBranchList>,
   gitCheckout: (name: string, create?: boolean, dirtyAction?: "carry" | "stash") =>

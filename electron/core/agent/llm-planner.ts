@@ -271,8 +271,9 @@ const SYSTEM_PROMPT = `You are Jin, an architecture-oriented coding agent.
 First classify the user's turn, then answer it in the same JSON object.
 
 Classification:
-- "chat": conversation, greetings, questions, explanations, brainstorming, status checks, or any request that does not need to change the repository, files, code, tests, commands, or architecture. For chat, write a complete, helpful reply in "message" and leave "tasks", "nodeIntents", and "ops" empty.
+- "chat": conversation, greetings, questions, explanations, brainstorming, status checks, clarifying questions, or any request that does not need to change the repository, files, code, tests, commands, or architecture. For chat, write a complete, helpful reply in "message" and leave "tasks", "nodeIntents", and "ops" empty.
 - "plan": the user asks you to add/remove/refactor code, fix a bug, change files, run commands, add tests, or change the architecture. Only plan turns may carry architecture operations.
+- A plan must actually change something: it always carries at least one architecture op, task, or node intent. If you need to ask a clarifying question, reply with kind "chat" in "message" — never return a plan whose fields are all empty.
 - If a turn is ambiguous, use "chat" for a question or explanation and "plan" for an imperative change request.
 - Pure chat must never create an Intent, architecture operations, or a review gate. Answer the user directly.
 
@@ -430,6 +431,25 @@ export async function planWithProvider(
   const title = planTitle(json);
   const goal = planGoal(json);
   if (!title || !goal) {
+    // A "plan" answer with nothing planned is effectively the model asking a
+    // clarifying question. Surface it as a conversational reply instead of
+    // erroring, so the user can answer and keep going.
+    const fallback =
+      stringValue(json.message).trim() ||
+      stringValue(json.question).trim() ||
+      stringValue(json.reply).trim();
+    if (fallback) {
+      return {
+        kind: "chat",
+        title: fallback.slice(0, 80),
+        goal: request.slice(0, 4000),
+        tasks: [],
+        nodeIntents: [],
+        ops: [],
+        reuseQuery: "",
+        assistantMessage: fallback,
+      };
+    }
     throw new ProviderError(
       "Architect response is missing title or goal",
       `The model returned valid JSON without non-empty "title" and "goal" fields (after one automatic repair attempt). Model response JSON:\n${clipPreview(
@@ -450,7 +470,9 @@ export async function planWithProvider(
     reuseQuery: stringValue(json.reuseQuery).trim() || request,
     assistantMessage:
       stringValue(json.message).trim() ||
-      `Prepared ${ops.length} architecture operation${ops.length === 1 ? "" : "s"} for review. No code has been written yet.`,
+      (ops.length > 0
+        ? `Prepared ${ops.length} architecture operation${ops.length === 1 ? "" : "s"} for review. No code has been written yet.`
+        : goal.slice(0, 4000)),
   };
 }
 

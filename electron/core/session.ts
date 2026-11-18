@@ -235,6 +235,16 @@ export function streamingPreview(raw: string, fields: readonly string[]): string
   return "";
 }
 
+/**
+ * Compose the message body for a turn the user stopped. Whatever the model had
+ * already streamed is kept verbatim so stopping never throws away readable
+ * work; the "stopped" marker is appended below it.
+ */
+export function stoppedMessage(partial: string | undefined, marker: string): string {
+  const kept = partial?.trim() ?? "";
+  return kept ? `${kept}\n\n${marker}` : marker;
+}
+
 function latestHlc(records: readonly WalRecord[]): Hlc | null {
   let best: Hlc | null = null;
   for (const record of records) {
@@ -374,6 +384,71 @@ export class ProjectSession {
     this.startWatcher();
   }
 
+  /**
+   * Minimal session backed by an in-memory state only: no WAL file, index,
+   * watcher, or settings file is required. Used by unit tests that exercise
+   * the chat, recall, and undo flows.
+   */
+  static lightweight(deps: SessionDeps, root = "/tmp/jin-test-project"): ProjectSession {
+    const session = Object.create(ProjectSession.prototype) as ProjectSession;
+    const state = session as unknown as Record<string, unknown>;
+    state.root = resolve(root);
+    state.deps = deps;
+    state.records = [];
+    state.snapshot = emptySnapshot();
+    state.conflicts = [];
+    state.warnings = [];
+    state.proposal = null;
+    state.messages = [];
+    state.index = {};
+    state.lspStore = {};
+    state.skills = {};
+    state.mcp = {};
+    state.marketplace = {};
+    state.config = {
+      version: 1,
+      project: { name: root, languages: [] },
+      scan: { roots: [root], ignore: [] },
+      approval: { mode: "single", required: 1 },
+      ui: { theme: "dark", glass: "subtle" },
+    } as unknown as JinConfig;
+    state.scanStatus = session.emptyScanStatus();
+    state.agentStatus = session.emptyAgentStatus();
+    state.lsp = [];
+    state.lastLspFacts = null;
+    state.scanResult = null;
+    state.rag = {};
+    state.usage = new UsageLedger(root);
+    state.tools = { builtin: [], skills: [], mcpServers: [], updatedAt: nowIso() };
+    state.lastContext = {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      model: "",
+      updatedAt: null,
+    };
+    state.clock = new HlcClock("user:test", undefined);
+    state.actor = { id: "user:test", kind: "user", name: "test" };
+    state.watcher = null;
+    state.sourceWatchers = [];
+    state.refreshTimer = null;
+    state.sourceTimer = null;
+    state.factsRefresh = null;
+    state.abortController = null;
+    state.stream = null;
+    state.streamTimer = null;
+    state.streamId = ulid();
+    state.conversationSummary = "";
+    state.compactionCount = 0;
+    state.checkpoints = new Map();
+    state.lastCheckpointVersionId = null;
+    state.lastUserImages = [];
+    state.closed = false;
+    state.branch = null;
+    state.localWrites = new Set();
+    return session;
+  }
+
   private t(key: MessageKey, params?: TranslationParams): string {
     return translate(this.deps.settings.get().language, key, params);
   }
@@ -464,12 +539,16 @@ export class ProjectSession {
     if (!latest || latest.status !== "approved" || latest.implementations.length > 0) return;
     const intent = this.snapshot.intents[latest.intentId];
     if (!intent || intent.mode === "architecture") return;
+    const cancelledEn = translate("en", "session.implementationCancelled");
+    const cancelledZh = translate("zh", "session.implementationCancelled");
     const attemptEnded = this.messages.some(
       (message) =>
         message.proposalId === latest.id &&
         (message.kind === "error" ||
-          message.content === translate("en", "session.implementationCancelled") ||
-          message.content === translate("zh", "session.implementationCancelled")),
+          message.content === cancelledEn ||
+          message.content === cancelledZh ||
+          message.content.endsWith(cancelledEn) ||
+          message.content.endsWith(cancelledZh)),
     );
     if (attemptEnded) return;
     this.addMessage(
@@ -1374,13 +1453,39 @@ export class ProjectSession {
         });
       } catch (error) {
         if (signal.aborted) {
-          // Cancelling a turn must not fabricate a fallback proposal.
+          // Cancelling a turn must not fabricate a fallback proposal. Keep the
+          // user message with the partial draft they were reading; the plan
+          // simply did not complete.
+          const draft = streamingPreview(raw, ["message", "goal"]) || this.stream?.content?.trim();
           this.finishStream();
+          if (draft) {
+            this.addMessage(
+              "assistant",
+              "text",
+              stoppedMessage(draft, this.t("session.turnStopped")),
+            );
+          }
           this.agentStatus = this.emptyAgentStatus();
           this.emitState();
           return this.getState();
         }
         throw error;
+      }
+      if (signal.aborted) {
+        // The provider resolved just as the user stopped: treat it like a
+        // cancellation so no proposal is created behind their back.
+        const draft = streamingPreview(raw, ["message", "goal"]) || this.stream?.content?.trim();
+        this.finishStream();
+        if (draft) {
+          this.addMessage(
+            "assistant",
+            "text",
+            stoppedMessage(draft, this.t("session.turnStopped")),
+          );
+        }
+        this.agentStatus = this.emptyAgentStatus();
+        this.emitState();
+        return this.getState();
       }
       if (plan.kind === "chat") {
         this.finishStream();
@@ -1391,6 +1496,20 @@ export class ProjectSession {
       }
       const versionId = ulid();
       const normalized = normalizePlan(plan, this.snapshot, versionId);
+      // A plan turn that carries no ops and no node intents is just a
+      // clarifying question: surface it as a plain chat reply so the user can
+      // keep conversing instead of being gated on an empty review.
+      if (
+        normalized.ops.length === 0 &&
+        normalized.nodeIntents.length === 0 &&
+        plan.assistantMessage.trim()
+      ) {
+        this.finishStream();
+        this.addMessage("assistant", "text", plan.assistantMessage);
+        this.agentStatus = this.emptyAgentStatus();
+        this.emitState();
+        return this.getState();
+      }
       const intent = this.makeIntent(plan, versionId, normalized.nodeIntents);
       const touches = this.touchesForIntent(normalized.nodeIntents, normalized.ops, intent);
       const proposal = this.makeProposal(intent, normalized.ops, touches, reusePlan);
@@ -1416,6 +1535,13 @@ export class ProjectSession {
       this.emitState();
       return this.getState();
     } catch (error) {
+      if (signal.aborted) {
+        // Cancelled before the plan call finished (e.g. during the pre-scan):
+        // stop quietly instead of reporting a provider failure.
+        this.agentStatus = this.emptyAgentStatus();
+        this.emitState();
+        return this.getState();
+      }
       const message = this.errorMessage(error);
       this.agentStatus = {
         phase: "error",
@@ -2690,11 +2816,15 @@ Rules:
             phase: "error",
             message,
           };
+      // Keeping the partial implementation summary means "stopping" never
+      // loses the work-in-progress text the user was following.
+      const stoppedContent = this.stream?.content?.trim();
+      this.finishStream();
       this.addMessage(
         "assistant",
         cancelled ? "text" : "error",
         cancelled
-          ? this.t("session.implementationCancelled")
+          ? stoppedMessage(stoppedContent, this.t("session.implementationCancelled"))
           : this.t("session.implementationFailed", {
               message,
             }),
@@ -2728,7 +2858,9 @@ Rules:
   /**
    * Undo the last implementation turn by restoring the pre-implementation Git
    * checkpoint into the working tree. HEAD is not moved; the architecture
-   * ledger is not touched. Only offered while no agent is running.
+   * ledger is not touched. Only offered while no agent is running. When no
+   * checkpoint exists (non-Git project, or the turn was planning-only), this
+   * is a silent no-op: the UI may still have recalled the message itself.
    */
   async undoLastImplementation(versionId?: string): Promise<AppState> {
     if (
@@ -2741,9 +2873,20 @@ Rules:
     const targetVersion = versionId ?? this.lastCheckpointVersionId;
     const checkpoint = targetVersion ? this.checkpoints.get(targetVersion) : undefined;
     if (!checkpoint) {
-      throw new Error(this.t("error.noCheckpoint"));
+      // No version to restore: the caller already rewound the chat history.
+      this.emitState();
+      return this.getState();
     }
-    const result = await restoreCheckpoint(this.root, checkpoint.hash);
+    let result: Awaited<ReturnType<typeof restoreCheckpoint>>;
+    try {
+      result = await restoreCheckpoint(this.root, checkpoint.hash);
+    } catch {
+      // A missing checkpoint must never surface as a scary error toast: the
+      // recall itself already happened, so just report the best-effort state.
+      this.addMessage("system", "text", this.t("chat.nothingToRestore"));
+      this.emitState();
+      return this.getState();
+    }
     this.checkpoints.delete(targetVersion as string);
     if (this.lastCheckpointVersionId === targetVersion) this.lastCheckpointVersionId = null;
     this.addMessage(
@@ -2754,7 +2897,13 @@ Rules:
         hash: checkpoint.hash.slice(0, 12),
       }),
     );
-    await this.scan();
+    // Refresh the architecture view against the restored tree. A scan can be
+    // blocked while a proposal is under review; that must not fail the recall.
+    try {
+      await this.scan();
+    } catch {
+      // Keep the restored state even if the follow-up scan is skipped.
+    }
     this.emitState();
     return this.getState();
   }
@@ -2807,16 +2956,44 @@ Rules:
     return this.getState();
   }
 
+  /**
+   * Abort the in-flight turn. The caller is responsible for persisting the
+   * partial stream content and resetting the agent status when the aborted
+   * operation settles, so the text the user was reading is never silently
+   * dropped (issue: stopping must keep the message).
+   */
   cancelAgent(): void {
     this.abortController?.abort();
     this.abortController = null;
-    if (this.agentStatus.phase !== "idle") {
-      this.agentStatus = {
-        phase: "idle",
-        message: this.t("session.cancellationRequested"),
-      };
-      this.emitState();
+  }
+
+  /**
+   * Recall a chat message: remove it and every later message from the visible
+   * history and rewind the planner conversation to the turn before it. The WAL
+   * and Git are untouched; the UI clears its cache copy in a post-back event.
+   */
+  deleteMessage(id: string): AppState {
+    const index = this.messages.findIndex((message) => message.id === id);
+    if (index < 0) {
+      throw new Error(this.t("error.messageNotFound", { id }));
     }
+    // Exclusive end index: the recalled message and every later message go,
+    // which also removes a user turn's recorded assistant answer.
+    const retained = this.messages.slice(0, index);
+    const removed = this.messages.slice(index);
+    // A compacted summary must never outlive the turns it summarizes.
+    if (removed.length > 0) {
+      this.conversationSummary = "";
+      this.compactionCount = 0;
+    }
+    this.messages = retained;
+    this.persistChat();
+    if (removed.length > 0) {
+      // Mirror the cut in the renderer before the fresh state arrives.
+      this.deps.emit({ type: "chat-delete", messageId: id });
+    }
+    this.emitState();
+    return this.getState();
   }
 
   async refresh(): Promise<AppState> {

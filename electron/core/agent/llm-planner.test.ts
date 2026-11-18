@@ -314,4 +314,49 @@ describe("planWithProvider classification", () => {
       expect((failure as { details?: string }).details).toContain("No title here");
     });
   });
+
+  it("surfaces a plan answer that only asks a question as a chat reply", async () => {
+    await withResponse(
+      {
+        kind: "plan",
+        message: "Which file should the unit live in? The architecture has two candidates.",
+        tasks: [],
+        nodeIntents: [],
+        ops: [],
+      },
+      async () => {
+        const draft = await planWithProvider(config, "Add it somewhere", {
+          snapshot: emptySnapshot(),
+          skills: "",
+          reuseSummary: "",
+        });
+        expect(draft.kind).toBe("chat");
+        expect(draft.assistantMessage).toContain("Which file");
+        expect(draft.ops).toEqual([]);
+      },
+    );
+  });
+
+  it("keeps a real plan with a goal even when it has no ops", async () => {
+    await withResponse(
+      {
+        kind: "plan",
+        title: "Document the module",
+        goal: "Add a README for the module",
+        message: "Review the documentation intent",
+        tasks: [{ title: "Write the README", acceptance: ["README exists"] }],
+        nodeIntents: [],
+        ops: [],
+      },
+      async () => {
+        const draft = await planWithProvider(config, "Document it", {
+          snapshot: emptySnapshot(),
+          skills: "",
+          reuseSummary: "",
+        });
+        expect(draft.kind).toBe("plan");
+        expect(draft.title).toBe("Document the module");
+      },
+    );
+  });
 });

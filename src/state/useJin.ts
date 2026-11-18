@@ -3,6 +3,7 @@ import type {
   AppState,
   AppSettings,
   ChatStream,
+  JinEvent,
   FileContent,
   FileNode,
   GitActionResult,
@@ -33,6 +34,22 @@ export interface Toast {
 }
 
 export type ExpandedL0 = Record<string, true>;
+
+/** A chat turn typed while the agent was still working; sent when it settles. */
+export interface QueuedTurn {
+  text: string;
+  images?: string[];
+}
+
+/** Phases during which the agent owns the conversation and new turns queue. */
+export function isAgentWorking(phase: AppState["agent"]["phase"] | undefined): boolean {
+  return phase === "planning" || phase === "implementing" || phase === "verifying";
+}
+
+/** True when the agent owns nothing and a queued turn may start right away. */
+export function isAgentSettled(phase: AppState["agent"]["phase"] | undefined): boolean {
+  return phase === undefined || phase === "idle";
+}
 
 interface JinStore {
   app: AppState | null;
@@ -66,6 +83,11 @@ interface JinStore {
   fileError: string | null;
   /** Transient assistant text from the current planning/implementation turn. */
   stream: ChatStream | null;
+  /**
+   * Turns typed while the agent was still working. They flush automatically
+   * once the agent settles — including right after the user presses Stop.
+   */
+  queue: QueuedTurn[];
   /** Text to refill the composer with (e.g. after undoing a message). */
   composerSeed: string;
   update: UpdateState | null;
@@ -91,10 +113,16 @@ interface JinStore {
   amendArchitecture: (versionId: string) => Promise<void>;
   mergeIntent: () => Promise<void>;
   sendMessage: (text: string, images?: string[]) => Promise<void>;
+  /** Send the oldest queued turn when the agent has settled; no-op otherwise. */
+  flushQueue: () => Promise<void>;
+  /** Drop every queued turn without sending. */
+  clearQueue: () => void;
   approveProposal: (note?: string) => Promise<void>;
   rejectProposal: (note?: string) => Promise<void>;
   retryImplementation: (versionId?: string) => Promise<void>;
   undoImplementation: (versionId?: string) => Promise<void>;
+  /** Recall a chat message: drop it and every later message from the history. */
+  deleteMessage: (id: string, versionId?: string) => Promise<void>;
   cancelAgent: () => Promise<void>;
   saveSettings: (patch: SettingsPatch) => Promise<boolean>;
   refreshTools: () => Promise<ToolsInfo | null>;
@@ -168,6 +196,9 @@ export const useJin = create<JinStore>((set, get) => {
       return undefined;
     } finally {
       set({ busy: null });
+      // The busy flag just released: if turns were queued behind it (agent
+      // settled meanwhile), this is the moment they can finally go out.
+      if (get().queue.length > 0) void get().flushQueue();
     }
   };
 
@@ -212,6 +243,7 @@ export const useJin = create<JinStore>((set, get) => {
       .sort((left, right) => (right.ordinal ?? 0) - (left.ordinal ?? 0))[0];
 
     const patch: Partial<JinStore> = { app: next };
+    if (projectChanged) patch.queue = [];
     if (newProposal) {
       patch.expandedL0 = {};
       patch.selectedVersionId = null;
@@ -264,6 +296,16 @@ export const useJin = create<JinStore>((set, get) => {
     if (next.project && get().leftTab === "files" && !get().fileTree) {
       void get().loadFileTree();
     }
+
+    // The agent just settled (turn finished, or the user pressed Stop): flush
+    // whatever the user queued while it was working.
+    if (isAgentWorking(previous?.agent?.phase) && !isAgentWorking(next.agent?.phase)) {
+      void get().flushQueue();
+    }
+    // A resolved review gate also unblocks queued turns.
+    if (reviewEnded) {
+      void get().flushQueue();
+    }
   };
 
   const handleAgentEvent = (state: AppState): void => {
@@ -276,6 +318,7 @@ export const useJin = create<JinStore>((set, get) => {
     startupError: null,
     busy: null,
     toasts: [],
+    queue: [],
     intentsCollapsed: false,
     expandedL0: {},
     leftTab: "intents",
@@ -319,9 +362,23 @@ export const useJin = create<JinStore>((set, get) => {
             throw new Error(t("error.preload"));
           }
           unsubscribe?.();
-          unsubscribe = window.jin.onEvent((event) => {
+          unsubscribe = window.jin.onEvent((event: JinEvent) => {
             if (event.type === "state") {
               acceptState(event.state);
+            } else if (event.type === "chat-delete") {
+              // The main process is authoritative for chat history; mirror its
+              // cut (the recalled message and every later one) so the deleted
+              // turn disappears everywhere before the fresh state arrives.
+              set((state) => {
+                if (!state.app) return state;
+                const cut = state.app.messages.findIndex(
+                  (message) => message.id === event.messageId,
+                );
+                if (cut < 0) return state;
+                return {
+                  app: { ...state.app, messages: state.app.messages.slice(0, cut) },
+                };
+              });
             } else if (event.type === "agent") {
               handleAgentEvent(event.state);
             } else if (event.type === "stream") {
@@ -418,10 +475,38 @@ export const useJin = create<JinStore>((set, get) => {
 
     sendMessage: async (text, images) => {
       const request = text.trim();
-      if ((!request && !images?.length) || get().busy) return;
+      if (!request && !images?.length) return;
+      // While the agent owns the conversation (or any other operation holds
+      // the busy flag) the turn queues instead of colliding; it flushes when
+      // the agent settles — including right after the user presses Stop.
+      if (isAgentWorking(get().app?.agent?.phase) || get().busy) {
+        set((state) => ({
+          queue: [...state.queue, { text: request, ...(images?.length ? { images } : {}) }],
+        }));
+        notify("info", t("chat.queued"));
+        return;
+      }
       await execute(t("busy.thinking"), () =>
         window.jin.sendMessage(request, images?.length ? images : undefined),
       );
+    },
+
+    flushQueue: async () => {
+      const state = get();
+      // Busy means another operation owns the UI; the next opportunity retries.
+      // A review gate also holds the turn back: approving it starts the next
+      // phase, and the queued turn follows when that settles.
+      if (state.busy || !isAgentSettled(state.app?.agent?.phase)) return;
+      if (isReviewing(state.app?.proposal ?? null)) return;
+      const next = state.queue[0];
+      if (!next) return;
+      // Take the turn out first so a re-entrant flush cannot send it twice.
+      set((current) => ({ queue: current.queue.slice(1) }));
+      await get().sendMessage(next.text, next.images);
+    },
+
+    clearQueue: () => {
+      set({ queue: [] });
     },
 
     approveProposal: async (note) => {
@@ -478,12 +563,48 @@ export const useJin = create<JinStore>((set, get) => {
     },
 
     undoImplementation: async (versionId) => {
-      try {
-        await execute(t("busy.restoring"), () => window.jin.undoImplementation(versionId));
-        notify("success", t("toast.checkpointRestored"));
-      } catch (error) {
-        notify("error", errorMessage(error));
+      const before = get().app?.messages.length ?? 0;
+      const app = await execute(t("busy.restoring"), () =>
+        window.jin.undoImplementation(versionId),
+      );
+      if (!app) return;
+      // The backend appends a row only when it acted: either the restored
+      // checkpoint (success) or "nothing to restore" (checkpoint already gone).
+      const added = app.messages.slice(before);
+      if (added.length === 0) return;
+      const nothingToRestore = t("chat.nothingToRestore");
+      if (added.some((message) => message.content === nothingToRestore)) return;
+      notify("success", t("toast.checkpointRestored"));
+    },
+
+    deleteMessage: async (id, versionId) => {
+      // A user turn has no proposalId of its own: its assistant answer carries
+      // the version. Resolve it within the same turn (up to the next user
+      // message) before the history is cut, so recalling a user message can
+      // still restore that turn's checkpoint.
+      const messages = get().app?.messages ?? [];
+      const index = messages.findIndex((message) => message.id === id);
+      let turnVersion: string | undefined;
+      if (index >= 0 && messages[index]?.role === "user") {
+        for (let next = index + 1; next < messages.length; next += 1) {
+          const message = messages[next];
+          if (!message || message.role === "user") break;
+          if (message.proposalId) {
+            turnVersion = message.proposalId;
+            break;
+          }
+        }
       }
+      const target = versionId ?? turnVersion;
+      const deleted = await execute(t("chat.messageRecalled"), () =>
+        window.jin.deleteChatMessage(id),
+      );
+      if (!deleted) return;
+      notify("info", t("chat.messageRecalled"));
+      // If the recalled turn owned an implementation checkpoint, restore the
+      // working tree to it. When no checkpoint exists the backend no-ops
+      // silently, so recalling a planning-only message never errors.
+      if (target) await get().undoImplementation(target);
     },
 
     cancelAgent: async () => {

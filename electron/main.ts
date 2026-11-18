@@ -925,6 +925,11 @@ function registerIpcHandlers(): void {
       ),
   );
 
+  ipcMain.handle(IPC_CHANNELS.deleteChatMessage, (_event, id: unknown): AppState => {
+    if (typeof id !== "string" || !id) throw new Error(t("error.messageIdString"));
+    return requireSession().deleteMessage(id);
+  });
+
   ipcMain.handle(IPC_CHANNELS.gitStatus, (): Promise<GitStatus> =>
     gitStatus(requireSession().root),
   );
