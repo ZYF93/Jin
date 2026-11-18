@@ -2981,6 +2981,12 @@ Rules:
     // which also removes a user turn's recorded assistant answer.
     const retained = this.messages.slice(0, index);
     const removed = this.messages.slice(index);
+    // A failed turn leaves the agent stuck in its "error" phase. When that
+    // error row is cut, clear the phase too, otherwise the panel keeps
+    // showing the failure card after the recall.
+    if (this.agentStatus.phase === "error" && removed.some((m) => m.kind === "error")) {
+      this.agentStatus = this.emptyAgentStatus();
+    }
     // A compacted summary must never outlive the turns it summarizes.
     if (removed.length > 0) {
       this.conversationSummary = "";

@@ -530,6 +530,8 @@ function ProviderTab({
   setSearchApiKey,
   clearSearchKey,
   setClearSearchKey,
+  profileName,
+  onProfileNameChange,
 }: {
   draft: Draft;
   setDraft: (patch: Partial<Draft>) => void;
@@ -542,10 +544,11 @@ function ProviderTab({
   setSearchApiKey: (value: string) => void;
   clearSearchKey: boolean;
   setClearSearchKey: (value: boolean) => void;
+  profileName: string;
+  onProfileNameChange: (value: string) => void;
 }) {
   const t = useT();
   const saveSettings = useJin((state) => state.saveSettings);
-  const [profileName, setProfileName] = useState("");
   const openai = draft.providerKind === "openai-compatible";
   const [models, setModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -829,76 +832,6 @@ function ProviderTab({
         <div className="hint mt-1">{t("settings.priceHint")}</div>
 
         <div className="mt-3">
-          <div className="label">{t("settings.savedProviders")}</div>
-          {settings.providerProfiles.length === 0 ? (
-            <div className="hint">{t("settings.savedProvidersEmpty")}</div>
-          ) : (
-            <div className="mt-1.5 space-y-1.5">
-              {settings.providerProfiles.map((profile) => (
-                <div
-                  key={profile.id}
-                  className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--panel)]/70 px-2.5 py-1.5"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[9.5px] font-semibold text-[var(--text)]">
-                      {profile.name}
-                    </div>
-                    <div className="truncate font-mono-ui text-[8px] text-[var(--faint)]">
-                      {profile.kind} · {profile.model}
-                      {profile.hasApiKey ? " · " + t("settings.stored") : ""}
-                    </div>
-                  </div>
-                  <button
-                    className="btn h-6 px-2 text-[8.5px]"
-                    onClick={() =>
-                      setDraft({
-                        providerKind: profile.kind,
-                        baseUrl: profile.baseUrl,
-                        model: profile.model,
-                        reasoningEffort: profile.reasoningEffort,
-                        ...(profile.contextWindow ? { contextWindow: profile.contextWindow } : {}),
-                      })
-                    }
-                    title={t("settings.applyProfile")}
-                  >
-                    <Plug size={10} />
-                    {t("settings.apply")}
-                  </button>
-                  <button
-                    className="btn h-6 px-1.5 text-[8.5px] text-[var(--faint)] hover:text-[var(--danger)]"
-                    onClick={() => void saveSettings({ deleteProviderProfileId: profile.id })}
-                    title={t("settings.deleteProfile")}
-                  >
-                    <Trash2 size={10} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="mt-2 flex gap-2">
-            <input
-              className="field h-7 text-[9px]"
-              value={profileName}
-              onChange={(event) => setProfileName(event.target.value)}
-              placeholder={t("settings.profilePlaceholder")}
-            />
-            <button
-              className="btn h-7 px-2.5 text-[8.5px]"
-              onClick={() =>
-                void saveSettings({
-                  saveProviderProfile: { name: profileName.trim() || "Provider" },
-                })
-              }
-              disabled={draft.providerKind === "none"}
-              title={t("settings.saveProfileHint")}
-            >
-              <GitMerge size={10} />
-              {t("settings.saveProfile")}
-            </button>
-          </div>
-        </div>
-
-        <div className="mt-3">
           <div className="label">{t("settings.searchEndpoint")}</div>
           <input
             className="field font-mono-ui"
@@ -1002,6 +935,65 @@ function ProviderTab({
             </div>
           </div>
         ) : null}
+
+        <div className="mt-3">
+          <div className="label">{t("settings.savedProviders")}</div>
+          {settings.providerProfiles.length === 0 ? (
+            <div className="hint">{t("settings.savedProvidersEmpty")}</div>
+          ) : (
+            <div className="mt-1.5 space-y-1.5">
+              {settings.providerProfiles.map((profile) => (
+                <div
+                  key={profile.id}
+                  className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--panel)]/70 px-2.5 py-1.5"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[9.5px] font-semibold text-[var(--text)]">
+                      {profile.name}
+                    </div>
+                    <div className="truncate font-mono-ui text-[8px] text-[var(--faint)]">
+                      {profile.kind} · {profile.model}
+                      {profile.hasApiKey ? " · " + t("settings.stored") : ""}
+                    </div>
+                  </div>
+                  <button
+                    className="btn h-6 px-2 text-[8.5px]"
+                    onClick={() =>
+                      setDraft({
+                        providerKind: profile.kind,
+                        baseUrl: profile.baseUrl,
+                        model: profile.model,
+                        reasoningEffort: profile.reasoningEffort,
+                        ...(profile.contextWindow ? { contextWindow: profile.contextWindow } : {}),
+                      })
+                    }
+                    title={t("settings.applyProfile")}
+                  >
+                    <Plug size={10} />
+                    {t("settings.apply")}
+                  </button>
+                  <button
+                    className="btn h-6 px-1.5 text-[8.5px] text-[var(--faint)] hover:text-[var(--danger)]"
+                    onClick={() => void saveSettings({ deleteProviderProfileId: profile.id })}
+                    title={t("settings.deleteProfile")}
+                  >
+                    <Trash2 size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-2">
+            <input
+              className="field h-7 w-full text-[9px]"
+              value={profileName}
+              onChange={(event) => onProfileNameChange(event.target.value)}
+              placeholder={t("settings.profilePlaceholder")}
+              disabled={draft.providerKind === "none"}
+            />
+            <div className="hint mt-1">{t("settings.saveProfileHint")}</div>
+          </div>
+        </div>
       </section>
 
       <section>
@@ -1687,6 +1679,9 @@ export function SettingsDialog() {
   const [searchApiKey, setSearchApiKey] = useState("");
   const [clearSearchKey, setClearSearchKey] = useState(false);
   const [validation, setValidation] = useState<string | null>(null);
+  // Optional preset name for the provider endpoint; saved together with the
+  // main "Save settings" action so the user never looks for a second button.
+  const [profileName, setProfileName] = useState("");
 
   useEffect(() => {
     if (!open || !settings) return;
@@ -1695,9 +1690,27 @@ export function SettingsDialog() {
     setClearKey(false);
     setSearchApiKey("");
     setClearSearchKey(false);
+    setProfileName("");
     setValidation(null);
     // Reset only when the dialog opens; background state updates must not clobber edits.
   }, [open]);
+
+  // Typing a preset name snapshots the current provider under that name right
+  // away (no extra button): the pending provider edits are saved first because
+  // the backend profiles the *applied* provider, then re-saved by name
+  // (deduped by name). The main "Save settings" action also includes it.
+  const handleProfileNameChange = async (value: string): Promise<void> => {
+    setProfileName(value);
+    if (!draft || draft.providerKind === "none" || value.trim() === "") return;
+    const saved = await saveSettings({
+      providerKind: draft.providerKind,
+      providerBaseUrl: draft.baseUrl.trim(),
+      providerModel: draft.model.trim(),
+      apiKey: apiKey.trim() ? apiKey.trim() : undefined,
+    });
+    if (!saved || value.trim() === "") return;
+    await saveSettings({ saveProviderProfile: { name: value.trim() } });
+  };
 
   const setDraft = (patch: Partial<Draft>): void =>
     setDraftState((current) => (current ? { ...current, ...patch } : current));
@@ -1744,6 +1757,11 @@ export function SettingsDialog() {
     else if (clearKey) patch.apiKey = null;
     if (searchApiKey.trim()) patch.searchApiKey = searchApiKey.trim();
     else if (clearSearchKey) patch.searchApiKey = null;
+    // A preset name typed on the provider tab saves the current endpoint with
+    // it in the same action — no separate "save profile" button needed.
+    if (profileName.trim() && draft.providerKind !== "none") {
+      patch.saveProviderProfile = { name: profileName.trim() };
+    }
     const ok = await saveSettings(patch);
     if (ok) setOpen(false);
   };
@@ -1812,6 +1830,8 @@ export function SettingsDialog() {
                 setSearchApiKey={setSearchApiKey}
                 clearSearchKey={clearSearchKey}
                 setClearSearchKey={setClearSearchKey}
+                profileName={profileName}
+                onProfileNameChange={(value) => void handleProfileNameChange(value)}
               />
             </>
           ) : tab === "team" ? (

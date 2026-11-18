@@ -619,26 +619,26 @@ export function ChatComposer({
             }}
           />
           <button
-            className="btn h-7 w-7 shrink-0 p-0"
+            className="btn h-7 w-7 shrink-0 !p-0"
             disabled={disabled}
             onClick={() => fileInputRef.current?.click()}
             title={t("chat.attachImage")}
             aria-label={t("chat.attachImage")}
           >
-            <ImageIcon size={13} />
+            <ImageIcon size={16} />
           </button>
           <button
             className={
               working
-                ? "btn ml-auto h-7 w-7 shrink-0 border-rose-400/40 bg-rose-400/10 p-0 text-[var(--danger)] transition-colors hover:bg-rose-400/20"
-                : "btn btn-primary ml-auto h-7 w-7 shrink-0 p-0"
+                ? "btn ml-auto h-7 w-7 shrink-0 !p-0 border-rose-400/40 bg-rose-400/10 text-[var(--danger)] transition-colors hover:bg-rose-400/20"
+                : "btn btn-primary ml-auto h-7 w-7 shrink-0 !p-0"
             }
             disabled={working ? disabled : disabled || (!text.trim() && attachments.length === 0)}
             onClick={() => (working ? onStop() : void submit())}
             title={working ? t("chat.cancelAgent") : t("chat.send")}
             aria-label={working ? t("chat.cancelAgent") : t("chat.send")}
           >
-            {working ? <Square size={12} /> : busy ? <Spinner size={12} /> : <Send size={12} />}
+            {working ? <Square size={16} /> : busy ? <Spinner size={15} /> : <Send size={16} />}
           </button>
         </div>
       </div>

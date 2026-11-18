@@ -41,6 +41,7 @@ function ChangeRow({
   busy: boolean;
   onAction: (path: string) => void;
 }) {
+  const t = useT();
   return (
     <div className="group flex items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-[var(--control)]">
       <span
@@ -61,11 +62,7 @@ function ChangeRow({
         title={actionLabel}
         aria-label={`${actionLabel}: ${change.path}`}
       >
-        {actionLabel.includes("Unstage") || actionLabel.includes("取消") ? (
-          <RotateCcw size={9} />
-        ) : (
-          <Check size={9} />
-        )}
+        {actionLabel === t("git.unstage") ? <RotateCcw size={9} /> : <Check size={9} />}
       </button>
     </div>
   );

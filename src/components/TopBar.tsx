@@ -109,22 +109,22 @@ export function TopBar() {
           </span>
         </div>
         <button
-          className="btn btn-ghost h-8 px-2"
+          className="icon-btn"
           onClick={() => void refresh()}
           disabled={Boolean(busy)}
           title={t("topbar.refresh.title")}
+          aria-label={t("common.refresh")}
         >
-          <RefreshCw size={13} />
-          <span className="hidden xl:inline">{t("common.refresh")}</span>
+          <RefreshCw size={15} />
         </button>
         <button
-          className="btn h-8 px-2.5"
+          className="icon-btn"
           onClick={() => void scan()}
           disabled={Boolean(busy) || reviewing}
           title={reviewing ? t("topbar.scan.blocked") : t("topbar.scan.title")}
+          aria-label={t("common.scan")}
         >
-          {scanBusy ? <Spinner size={13} /> : <ScanSearch size={13} />}
-          <span className="hidden sm:inline">{t("common.scan")}</span>
+          {scanBusy ? <Spinner size={15} /> : <ScanSearch size={15} />}
         </button>
         <span className="mx-0.5 h-5 w-px bg-[var(--border)]" />
         <button

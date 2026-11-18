@@ -117,6 +117,10 @@ interface JinStore {
   flushQueue: () => Promise<void>;
   /** Drop every queued turn without sending. */
   clearQueue: () => void;
+  /** Drop one queued turn without sending. */
+  removeQueued: (index: number) => void;
+  /** Swap two queued turns so the user controls the send order. */
+  moveQueued: (from: number, to: number) => void;
   approveProposal: (note?: string) => Promise<void>;
   rejectProposal: (note?: string) => Promise<void>;
   retryImplementation: (versionId?: string) => Promise<void>;
@@ -483,7 +487,7 @@ export const useJin = create<JinStore>((set, get) => {
         set((state) => ({
           queue: [...state.queue, { text: request, ...(images?.length ? { images } : {}) }],
         }));
-        notify("info", t("chat.queued"));
+        notify("info", t("chat.queued", { count: get().queue.length + 1 }));
         return;
       }
       await execute(t("busy.thinking"), () =>
@@ -507,6 +511,32 @@ export const useJin = create<JinStore>((set, get) => {
 
     clearQueue: () => {
       set({ queue: [] });
+    },
+
+    removeQueued: (index) => {
+      set((state) => {
+        if (index < 0 || index >= state.queue.length) return state;
+        return { queue: state.queue.filter((_, i) => i !== index) };
+      });
+    },
+
+    moveQueued: (from, to) => {
+      set((state) => {
+        if (
+          from === to ||
+          from < 0 ||
+          to < 0 ||
+          from >= state.queue.length ||
+          to >= state.queue.length
+        ) {
+          return state;
+        }
+        const queue = [...state.queue];
+        const [moved] = queue.splice(from, 1);
+        if (!moved) return state;
+        queue.splice(to, 0, moved);
+        return { queue };
+      });
     },
 
     approveProposal: async (note) => {

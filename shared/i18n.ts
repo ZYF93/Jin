@@ -229,8 +229,11 @@ const en = {
   "chat.placeholder.project": "Describe an Intent, change, or refactor…",
   "chat.placeholder.none": "Open a project first…",
   "chat.queued":
-    "{count} turn queued — sends when the current turn settles, or right after Stop.|{count} turns queued — sends when the current turn settles, or right after Stop.",
+    "1 turn queued — sends when the current turn settles, or right after Stop.|{count} turns queued — sends when the current turn settles, or right after Stop.",
   "chat.clearQueue": "Clear queued turns",
+  "chat.queueMoveUp": "Send earlier",
+  "chat.queueMoveDown": "Send later",
+  "chat.queueRemove": "Remove from queue",
   "chat.enterHint": "Enter to send · Shift+Enter newline · @ files",
   "chat.send": "Send",
   "chat.sendMessage": "Send message",
@@ -515,10 +518,11 @@ const en = {
   "settings.compactionModeHint":
     "Auto trims the conversation locally first and only calls the model to summarize when trimming alone cannot fit. Trim only is instant and offline. LLM summary always asks the model for a handoff.",
   "settings.savedProviders": "Saved endpoints",
-  "settings.savedProvidersEmpty": "Save a provider endpoint below to re-apply it with one click.",
+  "settings.savedProvidersEmpty":
+    "No saved endpoints yet. Name the current endpoint below — it is saved automatically.",
   "settings.saveProfile": "Save",
   "settings.saveProfileHint":
-    "Snapshot the current endpoint, model and key into a reusable profile.",
+    "Typing a name saves the current endpoint, model and key as a profile.",
   "settings.profilePlaceholder": "Name, e.g. Work",
   "settings.apply": "Apply",
   "settings.applyProfile": "Load this endpoint into the form (then Save to keep)",
@@ -1375,6 +1379,9 @@ const zh: Record<MessageKey, string> = {
   "chat.placeholder.none": "请先打开项目…",
   "chat.queued": "已排队 {count} 条——当前任务结束或点击停止后自动发送。",
   "chat.clearQueue": "清空排队消息",
+  "chat.queueMoveUp": "提前发送",
+  "chat.queueMoveDown": "延后发送",
+  "chat.queueRemove": "从队列移除",
   "chat.enterHint": "Enter 发送 · Shift+Enter 换行 · @ 引用文件",
   "chat.send": "发送",
   "chat.sendMessage": "发送消息",
@@ -1636,9 +1643,10 @@ const zh: Record<MessageKey, string> = {
   "settings.compactionModeHint":
     "自动模式先本地裁剪，裁剪到不能再小且仍超预算时才调用模型做摘要。仅本地裁剪即时且离线。LLM 摘要始终请求模型生成交接摘要。",
   "settings.savedProviders": "已保存的接入口",
-  "settings.savedProvidersEmpty": "把当前 Provider 端点保存为预设，之后可一键切换。",
+  "settings.savedProvidersEmpty":
+    "还没有已保存的接入口。在下方为当前接入口命名，保存设置时会自动保存。",
   "settings.saveProfile": "保存",
-  "settings.saveProfileHint": "把当前端点、模型与密钥快照为可复用的预设。",
+  "settings.saveProfileHint": "输入名称后会自动把当前端点、模型与密钥保存为预设。",
   "settings.profilePlaceholder": "名称，例如 工作",
   "settings.apply": "应用",
   "settings.applyProfile": "把该接入口填入表单（再点保存即可生效）",

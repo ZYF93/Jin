@@ -61,6 +61,7 @@ interface SessionInternals {
     extra?: Record<string, unknown>,
   ) => { id: string };
   messages: Array<{ id: string; role: string; kind: string; content: string; proposalId?: string }>;
+  agentStatus: { phase: string; message: string };
   checkpoints: Map<string, { hash: string; createdAt: string }>;
   lastCheckpointVersionId: string | null;
 }
@@ -116,6 +117,24 @@ describe("ProjectSession.deleteMessage (recall)", () => {
     const deleteEvents = events.filter((event) => event.type === "chat-delete");
     expect(deleteEvents).toHaveLength(1);
     expect(deleteEvents[0]).toEqual({ type: "chat-delete", messageId: answer.id });
+  });
+
+  it("clears the agent error phase when the recall cuts the error row", () => {
+    const { deps } = mockDeps(mockSettings());
+    const session = ProjectSession.lightweight(deps, tmpDir);
+    const sessionInternals = internals(session);
+    const userMessage = sessionInternals.addMessage("user", "text", "Do the thing");
+    sessionInternals.addMessage("assistant", "error", "The provider failed: 500");
+    sessionInternals.agentStatus = {
+      phase: "error",
+      message: "The provider failed: 500",
+    };
+
+    session.deleteMessage(userMessage.id);
+
+    expect(internals(session).messages).toHaveLength(0);
+    // The failure card disappears with its row; the agent is settled again.
+    expect(internals(session).agentStatus.phase).toBe("idle");
   });
 
   it("throws for an unknown message id", () => {

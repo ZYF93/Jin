@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
   Bot,
   Brain,
   CheckCircle2,
@@ -71,22 +73,15 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const current =
     proposal && message.proposalId && proposal.id === message.proposalId ? proposal : null;
   const [copied, setCopied] = useState(false);
-  // User rows and assistant text/implementation/error rows can be recalled:
-  // the history rewinds to just before them, so stopped replies and failed
-  // turns are recoverable too. Proposal and scan rows go through their own
-  // review/merge flows instead.
-  const undoAvailable =
-    !busy &&
-    !isSystem &&
-    (isUser ||
-      message.kind === "text" ||
-      message.kind === "implementation" ||
-      message.kind === "error");
+  // Only user turns are recalled: the history rewinds to just before them.
+  // Assistant replies (text/implementation/error) keep the conversation
+  // intact; proposal and scan rows go through their own review/merge flows.
+  const undoAvailable = !busy && isUser;
   const doUndo = async (): Promise<void> => {
-    // Recall the message from the visible history; the store resolves the
+    // Recall the user turn from the visible history; the store resolves the
     // turn's version and restores its checkpoint when one exists.
     await deleteMessage(message.id);
-    if (isUser && message.content.trim()) setComposerSeed(message.content);
+    if (message.content.trim()) setComposerSeed(message.content);
   };
   const copyMessage = async (): Promise<void> => {
     try {
@@ -171,12 +166,12 @@ function ChatBubble({ message }: { message: ChatMessage }) {
           {undoAvailable ? (
             <button
               type="button"
-              className="ml-0.5 inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-0.5 text-[8px] text-[var(--faint)] transition-colors hover:text-[var(--text)]"
+              className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded text-[var(--faint)] transition-colors hover:text-[var(--text)]"
               onClick={() => void doUndo()}
-              title={isUser ? t("chat.undoMessage") : t("chat.undoHint")}
+              title={t("chat.undoMessage")}
+              aria-label={t("chat.undoMessage")}
             >
               <Undo2 size={9} />
-              {t("chat.undo")}
             </button>
           ) : null}
         </div>
@@ -188,6 +183,11 @@ function ChatBubble({ message }: { message: ChatMessage }) {
 function StreamBubble() {
   const t = useT();
   const stream = useJin((state) => state.stream);
+  // The agent card below shows the same phase/label; hide the duplicate
+  // header row so only the content, tool activity, and reasoning remain.
+  const agent = useJin((state) => state.app?.agent);
+  const agentWorking =
+    agent?.phase === "planning" || agent?.phase === "implementing" || agent?.phase === "verifying";
   if (!stream) return null;
   const activity = stream.activity.slice(-30);
   return (
@@ -197,14 +197,16 @@ function StreamBubble() {
       </div>
       <div className="min-w-0 max-w-[calc(100%-28px)] flex-1">
         <div className="rounded-xl border border-[var(--accent)]/25 bg-[var(--panel-soft)] px-2.5 py-2">
-          <div className="flex items-center gap-1.5 text-[8px] font-semibold uppercase tracking-wide text-[var(--faint)]">
-            {stream.phase === "thinking" ? (
-              <Spinner size={8} className="text-[var(--accent)]" />
-            ) : (
-              <span className="status-dot success" />
-            )}
-            <span className="truncate">{stream.label}</span>
-          </div>
+          {!agentWorking && activity.length === 0 ? (
+            <div className="flex items-center gap-1.5 text-[8px] font-semibold uppercase tracking-wide text-[var(--faint)]">
+              {stream.phase === "thinking" ? (
+                <Spinner size={8} className="text-[var(--accent)]" />
+              ) : (
+                <span className="status-dot success" />
+              )}
+              <span className="truncate">{stream.label}</span>
+            </div>
+          ) : null}
           {activity.length > 0 ? (
             <div className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--panel)]/70 p-1.5">
               {activity.map((entry) => (
@@ -392,6 +394,8 @@ export function ChatPanel() {
   const disabled = !app?.project || reviewing || !configured;
   const queue = useJin((state) => state.queue);
   const clearQueue = useJin((state) => state.clearQueue);
+  const removeQueued = useJin((state) => state.removeQueued);
+  const moveQueued = useJin((state) => state.moveQueued);
   const cancelAgent = useJin((state) => state.cancelAgent);
 
   // Follow new content while the user is pinned to the bottom. The effect runs
@@ -504,19 +508,60 @@ export function ChatPanel() {
           </div>
         ) : null}
         {queue.length > 0 ? (
-          <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] px-2 py-1.5 text-[8.5px] text-[var(--muted)]">
-            <Clock size={10} className="shrink-0 text-[var(--accent)]" />
-            <span className="min-w-0 flex-1 truncate">
-              {t("chat.queued", { count: queue.length })}
-            </span>
-            <button
-              className="shrink-0 text-[var(--faint)] transition-colors hover:text-[var(--danger)]"
-              onClick={clearQueue}
-              title={t("chat.clearQueue")}
-              aria-label={t("chat.clearQueue")}
-            >
-              <X size={10} />
-            </button>
+          <div className="mb-2 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] px-2 py-1.5">
+            <div className="flex items-center gap-1.5 text-[8.5px] text-[var(--muted)]">
+              <Clock size={10} className="shrink-0 text-[var(--accent)]" />
+              <span className="min-w-0 flex-1 truncate">
+                {t("chat.queued", { count: queue.length })}
+              </span>
+              <button
+                className="shrink-0 text-[var(--faint)] transition-colors hover:text-[var(--danger)]"
+                onClick={clearQueue}
+                title={t("chat.clearQueue")}
+                aria-label={t("chat.clearQueue")}
+              >
+                <X size={10} />
+              </button>
+            </div>
+            <ul className="mt-1 space-y-1">
+              {queue.map((turn, index) => (
+                <li
+                  key={index}
+                  className="flex items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--panel)]/60 px-1.5 py-1 text-[8.5px]"
+                >
+                  <span className="shrink-0 font-mono-ui text-[7.5px] text-[var(--faint)]">
+                    {index + 1}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[var(--muted)]">{turn.text}</span>
+                  <button
+                    className="shrink-0 text-[var(--faint)] transition-colors hover:text-[var(--text)] disabled:opacity-30"
+                    onClick={() => moveQueued(index, index - 1)}
+                    disabled={index === 0}
+                    title={t("chat.queueMoveUp")}
+                    aria-label={t("chat.queueMoveUp")}
+                  >
+                    <ArrowUp size={10} />
+                  </button>
+                  <button
+                    className="shrink-0 text-[var(--faint)] transition-colors hover:text-[var(--text)] disabled:opacity-30"
+                    onClick={() => moveQueued(index, index + 1)}
+                    disabled={index === queue.length - 1}
+                    title={t("chat.queueMoveDown")}
+                    aria-label={t("chat.queueMoveDown")}
+                  >
+                    <ArrowDown size={10} />
+                  </button>
+                  <button
+                    className="shrink-0 text-[var(--faint)] transition-colors hover:text-[var(--danger)]"
+                    onClick={() => removeQueued(index)}
+                    title={t("chat.queueRemove")}
+                    aria-label={t("chat.queueRemove")}
+                  >
+                    <X size={10} />
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
         ) : null}
         <ChatComposer
