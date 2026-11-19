@@ -1583,7 +1583,8 @@ export class ProjectSession {
       const settings = this.deps.settings.get();
       const provider = this.deps.settings.providerConfig();
       const initialImport = !Object.values(this.snapshot.nodes).some((node) => node.level === "L1");
-      if ((settings.agent.semanticScan || initialImport) && isProviderConfigured(provider)) {
+      const semanticOn = settings.agent.semanticScan || initialImport;
+      if (semanticOn && isProviderConfigured(provider)) {
         this.scanStatus = {
           ...this.scanStatus,
           message: this.t("scan.refining"),
@@ -1614,6 +1615,19 @@ export class ProjectSession {
           updatedAt: scan.scannedAt,
         };
         this.emitState();
+      } else if (semanticOn) {
+        // The user wanted semantic refinement but it was not applied (no
+        // provider configured, or the toggle is off for a non-initial scan),
+        // so L0 descriptions would stay mechanical. Surface that explicitly.
+        this.addMessage(
+          "assistant",
+          "scan",
+          this.t("session.semanticSkipped", {
+            reason: isProviderConfigured(provider)
+              ? this.t("session.semanticSkippedReason.toggle")
+              : this.t("session.semanticSkippedReason.provider"),
+          }),
+        );
       }
       const importResult = diffScanToOps(this.snapshot, scan);
       if (importResult.ops.length === 0) {

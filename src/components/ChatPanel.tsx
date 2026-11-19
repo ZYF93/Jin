@@ -180,83 +180,13 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-function StreamBubble() {
-  const t = useT();
-  const stream = useJin((state) => state.stream);
-  // The agent card below shows the same phase/label; hide the duplicate
-  // header row so only the content, tool activity, and reasoning remain.
-  const agent = useJin((state) => state.app?.agent);
-  const agentWorking =
-    agent?.phase === "planning" || agent?.phase === "implementing" || agent?.phase === "verifying";
-  if (!stream) return null;
-  const activity = stream.activity.slice(-30);
-  return (
-    <div className="fade-in flex gap-2">
-      <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--accent-soft)]">
-        <Bot size={12} className="text-[var(--accent)]" />
-      </div>
-      <div className="min-w-0 max-w-[calc(100%-28px)] flex-1">
-        <div className="rounded-xl border border-[var(--accent)]/25 bg-[var(--panel-soft)] px-2.5 py-2">
-          {!agentWorking && activity.length === 0 ? (
-            <div className="flex items-center gap-1.5 text-[8px] font-semibold uppercase tracking-wide text-[var(--faint)]">
-              {stream.phase === "thinking" ? (
-                <Spinner size={8} className="text-[var(--accent)]" />
-              ) : (
-                <span className="status-dot success" />
-              )}
-              <span className="truncate">{stream.label}</span>
-            </div>
-          ) : null}
-          {activity.length > 0 ? (
-            <div className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--panel)]/70 p-1.5">
-              {activity.map((entry) => (
-                <div
-                  key={entry.id}
-                  className="flex min-w-0 items-start gap-1.5 text-[9px] leading-snug"
-                >
-                  {entry.isError ? (
-                    <AlertTriangle size={9} className="mt-0.5 shrink-0 text-[var(--danger)]" />
-                  ) : (
-                    <Wrench size={9} className="mt-0.5 shrink-0 text-[var(--accent)]" />
-                  )}
-                  <span
-                    className={`shrink-0 font-semibold ${
-                      entry.isError ? "text-[var(--danger)]" : "text-[var(--text)]"
-                    }`}
-                  >
-                    {entry.tool}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate font-mono-ui text-[var(--faint)]">
-                    {entry.detail}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          {stream.reasoning ? (
-            <details className="message-details mt-1.5" open={stream.phase === "thinking"}>
-              <summary className="flex items-center gap-1.5 text-[9px] font-semibold text-[var(--faint)]">
-                <Brain size={9} />
-                {t("chat.thinking")}
-              </summary>
-              <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[9.5px] italic leading-relaxed text-[var(--faint)]">
-                {stream.reasoning}
-              </pre>
-            </details>
-          ) : null}
-          <div className="mt-1 break-words text-[10.5px] leading-relaxed text-[var(--muted)]">
-            <MarkdownContent content={stream.content || t("chat.streamWaiting")} />
-            <span className="stream-caret" aria-hidden="true" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
   const t = useT();
   const agent = useJin((state) => state.app?.agent);
+  // The in-flight stream (planner draft + reasoning + tool feed) lives inside
+  // this card while the agent is working, so there is a single reply bar
+  // instead of a separate StreamBubble row.
+  const stream = useJin((state) => state.stream);
   if (!agent || agent.phase === "idle" || (agent.phase === "error" && suppressError)) {
     return null;
   }
@@ -316,6 +246,54 @@ function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
                   {agent.message}
                 </pre>
               </details>
+            ) : null}
+            {stream ? (
+              <div className="mt-1.5 space-y-1.5">
+                {stream.activity.length > 0 ? (
+                  <div className="max-h-24 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--panel)]/70 p-1.5">
+                    {stream.activity.slice(-12).map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="flex min-w-0 items-start gap-1.5 text-[9px] leading-snug"
+                      >
+                        {entry.isError ? (
+                          <AlertTriangle
+                            size={9}
+                            className="mt-0.5 shrink-0 text-[var(--danger)]"
+                          />
+                        ) : (
+                          <Wrench size={9} className="mt-0.5 shrink-0 text-[var(--accent)]" />
+                        )}
+                        <span
+                          className={`shrink-0 font-semibold ${
+                            entry.isError ? "text-[var(--danger)]" : "text-[var(--text)]"
+                          }`}
+                        >
+                          {entry.tool}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate font-mono-ui text-[var(--faint)]">
+                          {entry.detail}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {stream.reasoning ? (
+                  <details className="message-details" open={stream.phase === "thinking"}>
+                    <summary className="flex items-center gap-1.5 text-[9px] font-semibold text-[var(--faint)]">
+                      <Brain size={9} />
+                      {t("chat.thinking")}
+                    </summary>
+                    <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[9.5px] italic leading-relaxed text-[var(--faint)]">
+                      {stream.reasoning}
+                    </pre>
+                  </details>
+                ) : null}
+                <div className="break-words text-[10.5px] leading-relaxed text-[var(--muted)]">
+                  <MarkdownContent content={stream.content || t("chat.streamWaiting")} />
+                  <span className="stream-caret" aria-hidden="true" />
+                </div>
+              </div>
             ) : null}
           </div>
         </div>
@@ -482,7 +460,6 @@ export function ChatPanel() {
         ) : (
           messages.map((message) => <ChatBubble key={message.id} message={message} />)
         )}
-        <StreamBubble />
         <AgentActivity suppressError={errorAlreadyShown} />
       </div>
 

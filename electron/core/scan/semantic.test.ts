@@ -267,6 +267,46 @@ describe("runSemanticPass AGENTS.md rules", () => {
 
     expect(system).not.toContain("PROJECT RULES (AGENTS.md");
   });
+
+  it("grounds L0 module prompts in the actual child files, not a count", async () => {
+    let user = "";
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse((init?.body as string) ?? "{}") as {
+        messages?: Array<{ role: string; content: string }>;
+      };
+      user = body.messages?.find((message) => message.role === "user")?.content ?? "";
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ files: [], modules: [] }) } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    // Two files in nested dirs under module path "src/wal".
+    const nested = scanFixture();
+    nested.files = [
+      { ...nested.files[0]!, path: "src/wal/record.ts", absolute: "/p/src/wal/record.ts" },
+      { ...nested.files[0]!, path: "src/wal/merge.ts", absolute: "/p/src/wal/merge.ts" },
+    ];
+    nested.nodes = [
+      { ...nested.nodes.find((n) => n.level === "L0")!, path: "src/wal", name: "wal" },
+    ] as Array<import("../../../shared/ledger/types").ArchNodeDraft>;
+    await runSemanticPass(nested, {
+      kind: "openai-compatible",
+      baseUrl: "https://x/v1",
+      model: "m",
+      apiKey: "k",
+    });
+
+    const prompt = JSON.parse(user) as { modules: Array<Record<string, unknown>> };
+    const moduleEntry = prompt.modules.find((m) => m.path === "src/wal");
+    expect(moduleEntry).toBeDefined();
+    const childFiles = moduleEntry?.["childFiles"] as string[];
+    // The module's prompt must reference its real child files, so the model
+    // can describe the subsystem instead of falling back to "contains N".
+    expect(childFiles).toEqual(expect.arrayContaining(["record.ts", "merge.ts"]));
+  });
 });
 
 describe("member (facet) refinements", () => {

@@ -519,10 +519,9 @@ const en = {
     "Auto trims the conversation locally first and only calls the model to summarize when trimming alone cannot fit. Trim only is instant and offline. LLM summary always asks the model for a handoff.",
   "settings.savedProviders": "Saved endpoints",
   "settings.savedProvidersEmpty":
-    "No saved endpoints yet. Name the current endpoint below — it is saved automatically.",
-  "settings.saveProfile": "Save",
+    "No saved endpoints yet. Name the current endpoint and press Save settings to keep it.",
   "settings.saveProfileHint":
-    "Typing a name saves the current endpoint, model and key as a profile.",
+    "Name the current endpoint, then press Save settings to keep it as a profile.",
   "settings.profilePlaceholder": "Name, e.g. Work",
   "settings.apply": "Apply",
   "settings.applyProfile": "Load this endpoint into the form (then Save to keep)",
@@ -957,6 +956,11 @@ const en = {
   "session.importKindInitial": "Initial architecture import",
   "session.importKindSync": "Architecture sync",
   "session.scanFailed": "Scan failed: {message}",
+  "session.semanticSkipped":
+    "Skipped LLM description refinement ({reason}); structure and L0 summaries stay in their default mechanical form.",
+  "session.semanticSkippedReason.provider":
+    "no AI provider configured — enable one in Settings to have node roles described",
+  "session.semanticSkippedReason.toggle": "model-based refinement is turned off in Settings",
   "session.approvalIncomplete": "Approval was written incompletely: {message}",
   "session.approvedArchitecture":
     "Approved architecture version {ordinal}. This was an architecture-only change, so no code implementation is needed.",
@@ -1657,10 +1661,8 @@ const zh: Record<MessageKey, string> = {
   "settings.compactionModeHint":
     "自动模式先本地裁剪，裁剪到不能再小且仍超预算时才调用模型做摘要。仅本地裁剪即时且离线。LLM 摘要始终请求模型生成交接摘要。",
   "settings.savedProviders": "已保存的接入口",
-  "settings.savedProvidersEmpty":
-    "还没有已保存的接入口。在下方为当前接入口命名，保存设置时会自动保存。",
-  "settings.saveProfile": "保存",
-  "settings.saveProfileHint": "输入名称后会自动把当前端点、模型与密钥保存为预设。",
+  "settings.savedProvidersEmpty": "还没有已保存的接入口。为当前接入口命名并保存设置即可生成预设。",
+  "settings.saveProfileHint": "输入名称后，点击下方「保存设置」即可把当前端点保存为预设。",
   "settings.profilePlaceholder": "名称，例如 工作",
   "settings.apply": "应用",
   "settings.applyProfile": "把该接入口填入表单（再点保存即可生效）",
@@ -2075,6 +2077,10 @@ const zh: Record<MessageKey, string> = {
   "session.importKindInitial": "初始架构导入",
   "session.importKindSync": "架构同步",
   "session.scanFailed": "扫描失败：{message}",
+  "session.semanticSkipped": "未进行 LLM 职责细化（{reason}），结构与 L0 摘要保持默认的机械描述。",
+  "session.semanticSkippedReason.provider":
+    "尚未配置 AI Provider——在设置中启用一项后才会描述节点角色",
+  "session.semanticSkippedReason.toggle": "模型细化已在设置中关闭",
   "session.approvalIncomplete": "批准写入不完整：{message}",
   "session.approvedArchitecture": "已批准架构版本 {ordinal}。此变更仅涉及架构，无需代码实现。",
   "session.approvedVersion": "已批准版本 {ordinal}。{next}",

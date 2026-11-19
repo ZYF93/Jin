@@ -1794,21 +1794,10 @@ export function SettingsDialog() {
     // Reset only when the dialog opens; background state updates must not clobber edits.
   }, [open]);
 
-  // Typing a preset name snapshots the current provider under that name right
-  // away (no extra button): the pending provider edits are saved first because
-  // the backend profiles the *applied* provider, then re-saved by name
-  // (deduped by name). The main "Save settings" action also includes it.
-  const handleProfileNameChange = async (value: string): Promise<void> => {
+  // Typing a preset name only updates the draft; saving happens through the
+  // main "Save settings" action (see `save`), which includes the profile.
+  const handleProfileNameChange = (value: string): void => {
     setProfileName(value);
-    if (!draft || draft.providerKind === "none" || value.trim() === "") return;
-    const saved = await saveSettings({
-      providerKind: draft.providerKind,
-      providerBaseUrl: draft.baseUrl.trim(),
-      providerModel: draft.model.trim(),
-      apiKey: apiKey.trim() ? apiKey.trim() : undefined,
-    });
-    if (!saved || value.trim() === "") return;
-    await saveSettings({ saveProviderProfile: { name: value.trim() } });
   };
 
   const setDraft = (patch: Partial<Draft>): void =>
@@ -1931,7 +1920,7 @@ export function SettingsDialog() {
                 clearSearchKey={clearSearchKey}
                 setClearSearchKey={setClearSearchKey}
                 profileName={profileName}
-                onProfileNameChange={(value) => void handleProfileNameChange(value)}
+                onProfileNameChange={(value) => handleProfileNameChange(value)}
               />
             </>
           ) : tab === "team" ? (

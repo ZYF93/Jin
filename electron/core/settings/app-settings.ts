@@ -432,6 +432,22 @@ export class SettingsStore {
                 .map(([key, value]) => [key, value as string]),
             );
     }
+    if (patch.apiKey !== undefined) {
+      if (patch.apiKey === null || patch.apiKey.trim() === "") {
+        deleteSetting(this.app, API_KEY);
+      } else {
+        setSetting(this.app, API_KEY, encodeSecret(patch.apiKey.trim()));
+      }
+    }
+    if (patch.searchApiKey !== undefined) {
+      if (patch.searchApiKey === null || patch.searchApiKey.trim() === "") {
+        deleteSetting(this.app, SEARCH_API_KEY);
+      } else {
+        setSetting(this.app, SEARCH_API_KEY, encodeSecret(patch.searchApiKey.trim()));
+      }
+    }
+    // Snapshot the profile after the key so a freshly-typed key is reflected in
+    // the profile's hasApiKey flag.
     if (patch.saveProviderProfile?.name) {
       const current = raw.provider;
       const hasKey = Boolean(getSetting(this.app, API_KEY));
@@ -484,20 +500,6 @@ export class SettingsStore {
     }
     if (typeof patch.updateFeedUrl === "string") {
       raw.updates.feedUrl = patch.updateFeedUrl.trim();
-    }
-    if (patch.apiKey !== undefined) {
-      if (patch.apiKey === null || patch.apiKey.trim() === "") {
-        deleteSetting(this.app, API_KEY);
-      } else {
-        setSetting(this.app, API_KEY, encodeSecret(patch.apiKey.trim()));
-      }
-    }
-    if (patch.searchApiKey !== undefined) {
-      if (patch.searchApiKey === null || patch.searchApiKey.trim() === "") {
-        deleteSetting(this.app, SEARCH_API_KEY);
-      } else {
-        setSetting(this.app, SEARCH_API_KEY, encodeSecret(patch.searchApiKey.trim()));
-      }
     }
 
     this.writeRaw(raw);

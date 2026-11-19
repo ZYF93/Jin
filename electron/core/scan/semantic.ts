@@ -391,7 +391,27 @@ function promptFiles(scan: ScanResult): Array<Record<string, unknown>> {
   }));
 }
 
-function promptModules(scan: ScanResult): Array<Record<string, string>> {
+function promptModules(scan: ScanResult): Array<Record<string, unknown>> {
+  const byDir = new Map<string, string[]>();
+  for (const file of scan.files) {
+    const dir = file.path.slice(0, file.path.lastIndexOf("/"));
+    // Use the file's own basename (not the parent directory) so nested
+    // subdirectories still report their real files to the module prompt.
+    const base = file.path.split("/").filter(Boolean).pop() ?? file.path;
+    const list = byDir.get(dir) ?? [];
+    if (!list.includes(base)) list.push(base);
+    byDir.set(dir, list);
+  }
+  const moduleFiles = (path: string): string[] => {
+    const prefix = path.endsWith("/") ? path : `${path}/`;
+    const names = new Set<string>();
+    for (const [dir, files] of byDir) {
+      if (dir === path || dir.startsWith(prefix)) {
+        for (const name of files) names.add(name);
+      }
+    }
+    return [...names].sort().slice(0, 12);
+  };
   return scan.nodes
     .filter(isScanModule)
     .slice(0, 40)
@@ -399,6 +419,7 @@ function promptModules(scan: ScanResult): Array<Record<string, string>> {
       path: node.path,
       name: node.name,
       kind: node.kind,
+      childFiles: moduleFiles(node.path ?? ""),
     }));
 }
 
@@ -409,7 +430,7 @@ For each source file in the input, refine its architecture metadata:
 - members: for each listed member (method/field/property) of a file, one concrete sentence (at most 280 characters) describing what that member does for the system, not what it is; only include members whose names appear in the file's exports or members list.
 - domain: a short lowercase product domain shared by related files (for example billing, editor-shell, auth); do not use src or layer names.
 - symbols: optional names that already appear in the file's exports or members; never guess a symbol.
-For each listed source directory, return its responsibility: one sentence explaining the capability its child files jointly provide to the system and who consumes it; not "contains N files".
+For each listed source directory (module), return its responsibility: one sentence explaining the concrete capability its childFiles jointly provide to the system and who consumes it. Ground it in the actual childFiles (which are listed) — name the real subsystem, not a count. Never write "Contains N source units", "This module contains ...", or "is responsible for ..." — instead say what the group does, e.g. "Holds the WAL append, fold and replay primitives the session reads to rebuild snapshots."
 Rules:
 - If PROJECT RULES from AGENTS.md are provided, they define the project's own conventions (naming, layout, domains, tone). Use them as the vocabulary for responsibility, domain, and kind so the output matches how this project documents itself.
 - Only return file and module paths present in the input.
