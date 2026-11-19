@@ -236,6 +236,8 @@ export interface EkoCoderInput {
   webSearch?: { endpoint?: string; apiKey?: string | null };
   /** Images the user attached, forwarded to the implementation model via the OpenAI layer. */
   images?: readonly import("./provider").ImageAttachment[];
+  /** Compress shell tool output through the RTK proxy when enabled in settings. */
+  rtk?: boolean;
   onProgress?: (message: string) => void;
   /** Cumulative assistant text from Eko, forwarded as a transient chat stream. */
   onText?: (text: string, done: boolean) => void;
@@ -699,6 +701,7 @@ export async function runEkoCoder(
             cwd: cwd || undefined,
             timeoutMs,
             signal: input.signal,
+            rtk: input.rtk,
           });
           return toolResult(
             shellResultText(result),

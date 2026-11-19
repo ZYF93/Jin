@@ -18,6 +18,7 @@ import {
   type ProviderModelCatalog,
   type ProviderModelRequest,
   type ReuseCandidate,
+  type RtkStatus,
   type SettingsPatch,
   type ToolsInfo,
   type UpdateState,
@@ -67,6 +68,8 @@ const bridge: JinBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.saveGlobalAgentsMd, content) as Promise<{ path: string }>,
   getTools: () => ipcRenderer.invoke(IPC_CHANNELS.getTools) as Promise<ToolsInfo>,
   refreshTools: () => ipcRenderer.invoke(IPC_CHANNELS.refreshTools) as Promise<ToolsInfo>,
+  rtkStatus: () => ipcRenderer.invoke(IPC_CHANNELS.rtkStatus) as Promise<RtkStatus>,
+  installRtk: () => ipcRenderer.invoke(IPC_CHANNELS.installRtk) as Promise<RtkStatus>,
   searchExtensions: (query: string, limit?: number) =>
     ipcRenderer.invoke(
       IPC_CHANNELS.searchExtensions,

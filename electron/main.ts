@@ -35,6 +35,7 @@ import {
   type ProviderModelRequest,
   type RecentProject,
   type ReuseCandidate,
+  type RtkStatus,
   type SettingsPatch,
   type ToolsInfo,
   type UpdateState,
@@ -64,6 +65,8 @@ import {
   writeGlobalAgentsMd,
 } from "./core/rules/agents-md";
 import { fetchModelCatalog, ModelCatalogError } from "./core/agent/model-catalog";
+import { installRtk } from "./core/agent/rtk-install";
+import { configureRtkRuntime, rtkStatus } from "./core/agent/rtk";
 import {
   gitBranches,
   gitCheckout,
@@ -162,6 +165,7 @@ function emptySettings(): AppSettings {
       temperature: 0.2,
       maxTokens: 8000,
       maxWorkers: 0,
+      rtkCompression: false,
     },
     identity: { actorId: "user:uninitialized", name: t("common.jinUser"), email: "" },
     ui: { reduceMotion: false },
@@ -771,6 +775,16 @@ function registerIpcHandlers(): void {
     activeSession ? activeSession.refreshTools() : emptyTools(),
   );
 
+  ipcMain.handle(IPC_CHANNELS.rtkStatus, (): RtkStatus => rtkStatus());
+
+  ipcMain.handle(IPC_CHANNELS.installRtk, async (): Promise<RtkStatus> =>
+    installRtk().catch((error: unknown) => {
+      throw new Error(
+        t("error.rtkInstall", { message: error instanceof Error ? error.message : String(error) }),
+      );
+    }),
+  );
+
   ipcMain.handle(
     IPC_CHANNELS.searchExtensions,
     async (_event, query: unknown, limit: unknown): Promise<MarketplaceSearchResult> => {
@@ -1107,6 +1121,7 @@ function initializeApplication(): void {
   appDatabase = openAppDatabase(join(app.getPath("userData"), "jin.db"));
   settingsStore = new SettingsStore(appDatabase);
   lspMarketplace = new LspMarketplace(join(app.getPath("userData"), "lsp-extensions"));
+  configureRtkRuntime(join(app.getPath("userData"), "bin"));
   const settings = settingsStore.get();
   applyNativeTheme(settings.theme);
   updateService = new UpdateService({

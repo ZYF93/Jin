@@ -2406,6 +2406,7 @@ Rules:
               searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
               mcpTools: this.mcp.agentTools(),
               images: this.lastUserImages,
+              rtk: settings.agent.rtkCompression,
               webSearch: { endpoint: provider.searchEndpoint, apiKey: provider.searchApiKey },
               onTodos: (todoSummary, list) => {
                 if (signal.aborted) return;
@@ -2714,6 +2715,7 @@ Rules:
               searchCode: (query, limit) => this.rag.search(query, limit ?? 8),
               mcpTools: this.mcp.agentTools(),
               images: this.lastUserImages,
+              rtk: settings.agent.rtkCompression,
               onActivity: (entry) => {
                 if (signal.aborted) return;
                 this.pushActivity(entry.tool, entry.detail, entry.isError);

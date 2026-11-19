@@ -554,6 +554,19 @@ const en = {
   "settings.semanticScan": "Refine scans with the model",
   "settings.semanticScanDetail":
     "The first project scan uses the configured provider to describe file and directory responsibilities. This option also refines later scans; structural facts stay authoritative, and symbol claims are checked against LSP data.",
+  "settings.rtkCompression": "Compress tool output with RTK",
+  "settings.rtkCompressionDetail":
+    "When on, Jin asks the RTK CLI (github.com/rtk-ai/rtk) to rewrite supported shell commands so their output is compressed before it reaches the model. If RTK is missing, or a rewrite is declined or fails, the command runs unchanged.",
+  "settings.rtkReady": "RTK ready · {version}",
+  "settings.rtkMissing": "RTK is not installed. Install it to enable compression.",
+  "settings.rtkInstall": "Install RTK",
+  "settings.rtkInstalling": "Installing…",
+  "settings.rtkInstalled": "RTK installed ({version})",
+  "settings.rtkRecheck": "Re-check",
+  "settings.rtkInstallHint":
+    "Downloads the verified RTK release for this platform into Jin's app folder.",
+  "settings.rtkManual": "Other platforms: install guide",
+  "settings.rtkManagedPath": "Installed by Jin at {path}",
   "settings.temperature": "Temperature",
   "settings.temperatureHint": "Lower is more architectural and predictable.",
   "settings.maxTokens": "Max output tokens",
@@ -903,6 +916,7 @@ const en = {
   "error.gitBranch": "A valid branch name is required.",
   "error.preload": "The Jin preload bridge is unavailable. Start the app through Electron.",
   "error.unexpected": "Unexpected error.",
+  "error.rtkInstall": "RTK install failed: {message}",
 
   "scan.idle": "No scan yet.",
   "scan.ready": "Ready.",
@@ -1677,6 +1691,18 @@ const zh: Record<MessageKey, string> = {
   "settings.semanticScan": "用模型细化扫描",
   "settings.semanticScanDetail":
     "首次扫描会使用已配置的 Provider 描述文件与目录职责。开启此项后后续扫描也会细化；结构事实保持权威，符号声明会与 LSP 数据核对。",
+  "settings.rtkCompression": "用 RTK 压缩工具输出",
+  "settings.rtkCompressionDetail":
+    "开启后，Jin 会请 RTK CLI（github.com/rtk-ai/rtk）改写受支持的 shell 命令，使其输出在进入模型前被压缩。RTK 缺失、改写被拒绝或失败时，命令保持原样运行。",
+  "settings.rtkReady": "RTK 已就绪 · {version}",
+  "settings.rtkMissing": "尚未安装 RTK。安装后才能启用压缩。",
+  "settings.rtkInstall": "安装 RTK",
+  "settings.rtkInstalling": "安装中…",
+  "settings.rtkInstalled": "已安装 RTK（{version}）",
+  "settings.rtkRecheck": "重新检测",
+  "settings.rtkInstallHint": "将校验过的 RTK 发行版下载到 Jin 应用目录（当前平台适用）。",
+  "settings.rtkManual": "其他平台：安装指南",
+  "settings.rtkManagedPath": "由 Jin 安装至 {path}",
   "settings.temperature": "温度",
   "settings.temperatureHint": "越低越稳定、越偏架构。",
   "settings.maxTokens": "最大输出 Token",
@@ -2012,6 +2038,7 @@ const zh: Record<MessageKey, string> = {
   "error.gitBranch": "需要有效的分支名。",
   "error.preload": "Jin preload 桥不可用。请通过 Electron 启动应用。",
   "error.unexpected": "意外错误。",
+  "error.rtkInstall": "RTK 安装失败：{message}",
 
   "scan.idle": "尚未扫描。",
   "scan.ready": "就绪。",

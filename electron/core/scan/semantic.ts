@@ -24,6 +24,13 @@ const L1_KINDS: ReadonlySet<string> = new Set<L1Kind>([
   "config",
 ]);
 
+const EDGE_LIMITS: Record<string, number> = {
+  imports: 10,
+  dependents: 8,
+  exports: 6,
+  members: 8,
+};
+
 const MAX_RESPONSIBILITY = 280;
 const MAX_DOMAIN = 48;
 const MAX_SYMBOLS = 24;
@@ -347,14 +354,39 @@ export function applySemanticRefinement(
   };
 }
 
+function importPathToName(scan: ScanResult, specifier: string): string {
+  const fileSet = new Set(scan.files.map((file) => file.path));
+  const base = specifier.replace(/^@\w+\//, "");
+  const candidates = [specifier, base];
+  for (const candidate of candidates) {
+    if (fileSet.has(candidate)) return candidate.split("/").slice(-2)[0] ?? candidate;
+  }
+  return base;
+}
+
 function promptFiles(scan: ScanResult): Array<Record<string, unknown>> {
+  const dependents = new Map<string, string[]>();
+  for (const file of scan.files) {
+    for (const specifier of file.imports.slice(0, EDGE_LIMITS.imports)) {
+      const target = importPathToName(scan, specifier);
+      if (target === file.path) continue;
+      const list = dependents.get(target) ?? [];
+      if (list.length < (EDGE_LIMITS.dependents ?? 8) && !list.includes(file.path)) {
+        list.push(file.path);
+      }
+      dependents.set(target, list);
+    }
+  }
   return scan.files.slice(0, MAX_FILES).map((file) => ({
     path: file.path,
     language: file.language,
     currentKind: file.kind,
-    exports: file.exports.slice(0, 8),
-    members: file.members.slice(0, 10).map((member) => member.name),
-    imports: file.imports.slice(0, 6),
+    exports: file.exports.slice(0, EDGE_LIMITS.exports),
+    members: file.members.slice(0, EDGE_LIMITS.members).map((member) => member.name),
+    imports: file.imports
+      .slice(0, EDGE_LIMITS.imports)
+      .map((specifier) => importPathToName(scan, specifier)),
+    importedBy: (dependents.get(file.path) ?? []).slice(0, EDGE_LIMITS.dependents),
     currentResponsibility: file.responsibility.slice(0, 160),
   }));
 }
@@ -373,18 +405,19 @@ function promptModules(scan: ScanResult): Array<Record<string, string>> {
 const SYSTEM_PROMPT = `You are Jin's semantic architecture pass. You do not write code and you never invent files.
 For each source file in the input, refine its architecture metadata:
 - kind: one of component, hook, entity, service, repository, route, store, type, module, function, table, schema, config. Use module for ordinary files that are not clearly another kind; function is only for files whose primary role is reusable function behavior.
-- responsibility: one concrete sentence (at most 280 characters) about behavior, not a restatement of the filename.
-- members: for each listed member (method/field/property) of a file, one concrete sentence (at most 280 characters) describing what that member does; only include members whose names appear in the file's exports or members list.
+- responsibility: one concrete sentence (at most 280 characters) explaining WHAT THE UNIT DOES FOR THE WHOLE SYSTEM, not a restatement of the filename and not "it is a X". Use the context fields (imports, importedBy, exports, members) to state its role in the flow, e.g. "Entry point that turns a form submit into a validated order and hands it to the billing service." Never write "This file contains ..." or "This module is responsible for ...".
+- members: for each listed member (method/field/property) of a file, one concrete sentence (at most 280 characters) describing what that member does for the system, not what it is; only include members whose names appear in the file's exports or members list.
 - domain: a short lowercase product domain shared by related files (for example billing, editor-shell, auth); do not use src or layer names.
 - symbols: optional names that already appear in the file's exports or members; never guess a symbol.
-For each listed source directory, return its responsibility: describe the product or technical capability its child files jointly provide, not that it contains files or was scanned.
+For each listed source directory, return its responsibility: one sentence explaining the capability its child files jointly provide to the system and who consumes it; not "contains N files".
 Rules:
+- If PROJECT RULES from AGENTS.md are provided, they define the project's own conventions (naming, layout, domains, tone). Use them as the vocabulary for responsibility, domain, and kind so the output matches how this project documents itself.
 - Only return file and module paths present in the input.
 - Prefer the current kind unless the code clearly belongs to another kind.
 - Group related files under the same domain tag so L0 modules gain a semantic summary.
 - Do not output Markdown or commentary.
 Return strict JSON only:
-{"files":[{"path":"src/example.ts","kind":"service","responsibility":"Charges a saved payment method and records the result.","domain":"billing","symbols":["charge"],"members":[{"name":"charge","responsibility":"Validates the saved card, creates the charge, and records the ledger entry."}]}],"modules":[{"path":"src/billing","responsibility":"Coordinates payment creation, refunds, and invoice state.","domain":"billing"}]}`;
+{"files":[{"path":"src/example.ts","kind":"service","responsibility":"Charges a saved payment method and records the result.","domain":"billing","symbols":["charge"],"members":[{"name":"charge","responsibility":"Validates the saved card, creates the charge, and records the ledger entry."}]}],"modules":[{"path":"src/billing","responsibility":"Coordinates payment creation, refunds, and invoice state for the storefront.","domain":"billing"}]}`;
 
 /**
  * Run one bounded semantic pass over a structural scan. Failure is non-fatal:
@@ -412,7 +445,7 @@ export async function runSemanticPass(
 
   try {
     const system = options.rules?.trim()
-      ? `${SYSTEM_PROMPT}\n\nPROJECT RULES (AGENTS.md; the refinement must respect these):\n${options.rules.trim()}`
+      ? `${SYSTEM_PROMPT}\n\nPROJECT RULES (AGENTS.md):\n${options.rules.trim()}`
       : SYSTEM_PROMPT;
     const json = await completeJson(provider, system, user, {
       temperature: options.temperature ?? 0.2,

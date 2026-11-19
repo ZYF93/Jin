@@ -130,6 +130,10 @@ interface JinStore {
   cancelAgent: () => Promise<void>;
   saveSettings: (patch: SettingsPatch) => Promise<boolean>;
   refreshTools: () => Promise<ToolsInfo | null>;
+  /** Probe RTK for the settings status row. */
+  rtkStatus: () => Promise<import("../../shared/ipc").RtkStatus>;
+  /** Download and install RTK, then re-probe it. */
+  installRtk: () => Promise<import("../../shared/ipc").RtkStatus | null>;
   searchExtensions: (query: string, limit?: number) => Promise<MarketplaceSearchResult | null>;
   installLspExtension: (id: string) => Promise<LspInstallResult | null>;
   uninstallLspExtension: (id: string) => Promise<LspInstallResult | null>;
@@ -664,6 +668,19 @@ export const useJin = create<JinStore>((set, get) => {
         const tools = await window.jin.refreshTools();
         set((state) => (state.app ? { app: { ...state.app, tools } } : { app: state.app }));
         return tools;
+      } catch (error) {
+        notify("error", errorMessage(error));
+        return null;
+      }
+    },
+
+    rtkStatus: async () => window.jin.rtkStatus(),
+
+    installRtk: async () => {
+      try {
+        const status = await window.jin.installRtk();
+        notify("info", t("settings.rtkInstalled", { version: status.version ?? "" }));
+        return status;
       } catch (error) {
         notify("error", errorMessage(error));
         return null;

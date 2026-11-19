@@ -124,6 +124,14 @@ export interface AppSettings {
      * up to 3). Set to 1 to always use a single worker regardless of tasks.
      */
     maxWorkers: number;
+    /**
+     * Compress tool output before it enters the model context via RTK
+     * (https://github.com/rtk-ai/rtk). Jin asks the RTK CLI to rewrite
+     * supported shell commands so their output is compact; when RTK is
+     * missing, a rewrite is declined, or it fails, the command runs
+     * unchanged.
+     */
+    rtkCompression: boolean;
   };
   identity: {
     actorId: string;
@@ -176,6 +184,8 @@ export interface SettingsPatch {
   maxTokens?: number;
   /** Maximum parallel sub-agent workers for one implementation (0 = auto). */
   agentMaxWorkers?: number;
+  /** Compress shell/test output through the RTK proxy before model context. */
+  agentRtkCompression?: boolean;
   userName?: string;
   userEmail?: string;
   reduceMotion?: boolean;
@@ -379,6 +389,17 @@ export interface McpCallResult {
   isError: boolean;
   content: unknown;
   durationMs: number;
+}
+
+/** Result of probing the RTK CLI for the settings panel. */
+export interface RtkStatus {
+  installed: boolean;
+  /** First line of `rtk --version`, when the probe succeeded. */
+  version: string | null;
+  /** Resolved binary path, when one was found. */
+  path: string | null;
+  /** `path` when RTK is on PATH, `managed` when it is Jin's own install. */
+  source: "path" | "managed" | null;
 }
 
 export interface ToolsInfo {
@@ -622,6 +643,8 @@ export const IPC_CHANNELS = {
   saveGlobalAgentsMd: "jin:save-global-agents-md",
   getTools: "jin:get-tools",
   refreshTools: "jin:refresh-tools",
+  rtkStatus: "jin:rtk-status",
+  installRtk: "jin:install-rtk",
   searchExtensions: "jin:search-extensions",
   installLspExtension: "jin:install-lsp-extension",
   uninstallLspExtension: "jin:uninstall-lsp-extension",
@@ -684,6 +707,10 @@ export interface JinBridge {
   saveGlobalAgentsMd(content: string): Promise<{ path: string }>;
   getTools(): Promise<ToolsInfo>;
   refreshTools(): Promise<ToolsInfo>;
+  /** Probe the RTK CLI so settings can show whether compression will work. */
+  rtkStatus(): Promise<RtkStatus>;
+  /** Download and install the latest RTK release into Jin's user-data dir. */
+  installRtk(): Promise<RtkStatus>;
   searchExtensions(query: string, limit?: number): Promise<MarketplaceSearchResult>;
   installLspExtension(id: string): Promise<LspInstallResult>;
   uninstallLspExtension(id: string): Promise<LspInstallResult>;

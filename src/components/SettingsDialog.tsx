@@ -69,6 +69,7 @@ type Draft = {
   searchEndpoint: string;
   customHeaders: string;
   semanticScan: boolean;
+  rtkCompression: boolean;
   temperature: number;
   maxTokens: number;
   userName: string;
@@ -96,6 +97,7 @@ function draftFrom(settings: AppSettings): Draft {
       .map(([key, value]) => `${key}: ${value}`)
       .join("\n"),
     semanticScan: settings.agent.semanticScan,
+    rtkCompression: settings.agent.rtkCompression,
     temperature: settings.agent.temperature,
     maxTokens: settings.agent.maxTokens,
     userName: settings.identity.name,
@@ -549,11 +551,28 @@ function ProviderTab({
 }) {
   const t = useT();
   const saveSettings = useJin((state) => state.saveSettings);
+  const rtkStatus = useJin((state) => state.rtkStatus);
+  const installRtk = useJin((state) => state.installRtk);
   const openai = draft.providerKind === "openai-compatible";
   const [models, setModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsMessage, setModelsMessage] = useState<string | null>(null);
   const [logPath, setLogPath] = useState("");
+  const [rtk, setRtk] = useState<import("../../shared/ipc").RtkStatus | null>(null);
+  const [rtkBusy, setRtkBusy] = useState(false);
+
+  const refreshRtk = useCallback(
+    async (forceInstall: boolean) => {
+      setRtkBusy(true);
+      try {
+        if (forceInstall) await installRtk();
+        setRtk(await rtkStatus());
+      } finally {
+        setRtkBusy(false);
+      }
+    },
+    [installRtk, rtkStatus],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -569,6 +588,20 @@ function ProviderTab({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void rtkStatus()
+      .then((status) => {
+        if (!cancelled) setRtk(status);
+      })
+      .catch(() => {
+        if (!cancelled) setRtk(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [rtkStatus]);
 
   const loadModels = useCallback(async (): Promise<void> => {
     if (draft.providerKind === "none" || !draft.baseUrl.trim()) {
@@ -1032,6 +1065,72 @@ function ProviderTab({
             </span>
           </span>
         </label>
+        <label className="mt-2 flex cursor-pointer items-start gap-2.5 rounded-lg border border-[var(--border)] px-3 py-2.5">
+          <input
+            type="checkbox"
+            className="mt-0.5 accent-cyan-300"
+            checked={draft.rtkCompression}
+            onChange={(event) => setDraft({ rtkCompression: event.target.checked })}
+          />
+          <span>
+            <span className="block text-[10.5px] font-semibold">
+              {t("settings.rtkCompression")}
+            </span>
+            <span className="mt-0.5 block text-[9px] leading-relaxed text-[var(--faint)]">
+              {t("settings.rtkCompressionDetail")}
+            </span>
+          </span>
+        </label>
+        {draft.rtkCompression ? (
+          <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] px-3 py-2.5">
+            <div className="flex items-center gap-2 text-[9.5px]">
+              <span
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  rtk?.installed ? "bg-emerald-400" : "bg-amber-400"
+                }`}
+              />
+              <span className="min-w-0 flex-1 text-[var(--muted)]">
+                {rtk?.installed
+                  ? t("settings.rtkReady", { version: rtk.version ?? "" })
+                  : t("settings.rtkMissing")}
+              </span>
+              {rtk?.installed ? (
+                <button
+                  className="btn h-6 shrink-0 px-2 text-[8.5px]"
+                  disabled={rtkBusy}
+                  onClick={() => void refreshRtk(false)}
+                >
+                  {t("settings.rtkRecheck")}
+                </button>
+              ) : (
+                <button
+                  className="btn btn-primary h-6 shrink-0 px-2 text-[8.5px]"
+                  disabled={rtkBusy}
+                  onClick={() => void refreshRtk(true)}
+                >
+                  {rtkBusy ? t("settings.rtkInstalling") : t("settings.rtkInstall")}
+                </button>
+              )}
+            </div>
+            {rtk?.installed && rtk.source === "managed" ? (
+              <div className="mt-1.5 text-[8.5px] leading-relaxed text-[var(--faint)]">
+                {t("settings.rtkManagedPath", { path: rtk.path ?? "" })}
+              </div>
+            ) : !rtk?.installed ? (
+              <div className="mt-1.5 text-[8.5px] leading-relaxed text-[var(--faint)]">
+                {t("settings.rtkInstallHint")}{" "}
+                <a
+                  className="text-[var(--accent)] underline"
+                  href="https://www.rtk-ai.app/docs/getting-started/installation/"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t("settings.rtkManual")}
+                </a>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <div>
@@ -1746,6 +1845,7 @@ export function SettingsDialog() {
       providerSearchEndpoint: draft.searchEndpoint.trim(),
       providerCustomHeaders: parseCustomHeaders(draft.customHeaders),
       semanticScan: draft.semanticScan,
+      agentRtkCompression: draft.rtkCompression,
       temperature: draft.temperature,
       maxTokens: draft.maxTokens,
       userName: draft.userName,

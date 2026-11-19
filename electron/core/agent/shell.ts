@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { normalizeProjectPath } from "./path-safety";
+import { rewriteWithRtk, rtkPathEnv, type RtkRewrite } from "./rtk";
 
 export const DEFAULT_SHELL_TIMEOUT_MS = 15_000;
 export const MAX_SHELL_TIMEOUT_MS = 30_000;
@@ -13,6 +14,13 @@ export interface ShellRunInput {
   cwd?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * When true, ask RTK to rewrite the command (for example
+   * `git status` -> `rtk git status`) before it runs, provided the binary is
+   * on PATH. Any failure falls back to the original command so a missing
+   * tool never breaks the agent.
+   */
+  rtk?: boolean;
 }
 
 export interface ShellRunResult {
@@ -28,6 +36,8 @@ export interface ShellRunResult {
 
 export interface ShellAuditEntry {
   command: string;
+  /** Command RTK produced for `command`, when compression was enabled. */
+  rtkCommand?: string;
   cwd: string;
   exitCode?: number | null;
   durationMs?: number;
@@ -57,11 +67,20 @@ const DENIED_COMMANDS = new Set([
 ]);
 
 const DENIED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
-  { pattern: /(?:^|[\s;&|])rm\s+(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+)*\/\s*(?:$|[;&|])/, reason: "recursive deletion of the filesystem root" },
-  { pattern: /\bgit\s+(?:reset\s+--hard|clean\s+-[a-zA-Z]*[fdx]|push\s+--force|push\s+-f)\b/, reason: "destructive Git history rewrite" },
+  {
+    pattern: /(?:^|[\s;&|])rm\s+(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+)*\/\s*(?:$|[;&|])/,
+    reason: "recursive deletion of the filesystem root",
+  },
+  {
+    pattern: /\bgit\s+(?:reset\s+--hard|clean\s+-[a-zA-Z]*[fdx]|push\s+--force|push\s+-f)\b/,
+    reason: "destructive Git history rewrite",
+  },
   { pattern: /\bdd\s+[^\n]*\bof=/, reason: "raw disk writes" },
   { pattern: /:\(\)\s*\{/, reason: "fork bomb" },
-  { pattern: /\b(?:curl|wget)\b[^\n|]*\|\s*(?:ba|z|da)?sh\b/, reason: "piping a remote script into a shell" },
+  {
+    pattern: /\b(?:curl|wget)\b[^\n|]*\|\s*(?:ba|z|da)?sh\b/,
+    reason: "piping a remote script into a shell",
+  },
 ];
 
 /**
@@ -69,11 +88,7 @@ const DENIED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
  * an OS sandbox: commands may only use project-relative paths, and obviously
  * destructive commands are rejected. Every attempt is audited.
  */
-export function validateShellCommand(
-  command: string,
-  root: string,
-  cwd?: string,
-): string {
+export function validateShellCommand(command: string, root: string, cwd?: string): string {
   const clean = command.trim();
   if (!clean) throw new Error("Command is required");
   if (clean.includes("\0") || /[\r\n]/.test(clean)) {
@@ -88,7 +103,10 @@ export function validateShellCommand(
   if (/(^|[\s"'=:(])[A-Za-z]:[\\/]/.test(clean)) {
     throw new Error("Absolute paths are not allowed in shell commands; use project-relative paths");
   }
-  if (/(^|[\s"'=:(])~(?=$|[/\s"')])/.test(clean) || /\$(?:\{HOME\}|HOME\b)|%USERPROFILE%/i.test(clean)) {
+  if (
+    /(^|[\s"'=:(])~(?=$|[/\s"')])/.test(clean) ||
+    /\$(?:\{HOME\}|HOME\b)|%USERPROFILE%/i.test(clean)
+  ) {
     throw new Error("Home-directory shortcuts are not allowed in shell commands");
   }
   const first = shellWord(clean).replace(/^["']|["']$/g, "");
@@ -129,19 +147,14 @@ export function auditShell(root: string, entry: ShellAuditEntry): void {
   }
 }
 
-function appendCapped(
-  current: { text: string; truncated: boolean },
-  chunk: string,
-): void {
+function appendCapped(current: { text: string; truncated: boolean }, chunk: string): void {
   if (current.truncated) return;
   const next = current.text + chunk;
   if (Buffer.byteLength(next, "utf8") <= MAX_SHELL_OUTPUT_BYTES) {
     current.text = next;
     return;
   }
-  current.text = Buffer.from(next, "utf8")
-    .subarray(0, MAX_SHELL_OUTPUT_BYTES)
-    .toString("utf8");
+  current.text = Buffer.from(next, "utf8").subarray(0, MAX_SHELL_OUTPUT_BYTES).toString("utf8");
   current.truncated = true;
 }
 
@@ -162,6 +175,41 @@ function killTree(child: ChildProcess): void {
       // already gone
     }
   }
+}
+
+/**
+ * Rewrite one command through RTK, then run the result through the same
+ * guard. A rewrite that would escape the project, or that fails the guard for
+ * any reason, is discarded and the original command runs unchanged.
+ */
+function approvedRtkRewrite(root: string, command: string, cwd: string): RtkRewrite | null {
+  const rewritten = rewriteWithRtk(root, command);
+  if (!rewritten) return null;
+  try {
+    validateShellCommand(rewritten.command, root, cwd);
+  } catch {
+    return null;
+  }
+  return rewritten;
+}
+
+/** Make sure the shell can find the same RTK binary that produced the rewrite. */
+function shellEnv(rtk: RtkRewrite | null): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CI: "1",
+    NO_COLOR: "1",
+    FORCE_COLOR: "0",
+    TERM: "dumb",
+    GIT_PAGER: "cat",
+    PAGER: "cat",
+  };
+  if (!rtk) return env;
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path") delete env[key];
+  }
+  env.PATH = rtkPathEnv(rtk.binary);
+  return env;
 }
 
 /**
@@ -186,16 +234,18 @@ export async function runShell(input: ShellRunInput): Promise<ShellRunResult> {
     1_000,
     Math.min(
       MAX_SHELL_TIMEOUT_MS,
-      Number.isFinite(input.timeoutMs) ? Math.round(input.timeoutMs as number) : DEFAULT_SHELL_TIMEOUT_MS,
+      Number.isFinite(input.timeoutMs)
+        ? Math.round(input.timeoutMs as number)
+        : DEFAULT_SHELL_TIMEOUT_MS,
     ),
   );
   const absoluteCwd = cwd === "." ? input.root : resolve(input.root, cwd);
-  const command = input.command.trim();
+  const original = input.command.trim();
+  const rtkRewrite = input.rtk === true ? approvedRtkRewrite(input.root, original, cwd) : null;
+  const command = rtkRewrite?.command ?? original;
   const isWindows = process.platform === "win32";
-  const executable = isWindows ? process.env.ComSpec ?? "cmd.exe" : "/bin/sh";
-  const args = isWindows
-    ? ["/d", "/s", "/c", command]
-    : ["-c", command];
+  const executable = isWindows ? (process.env.ComSpec ?? "cmd.exe") : "/bin/sh";
+  const args = isWindows ? ["/d", "/s", "/c", command] : ["-c", command];
 
   return new Promise<ShellRunResult>((resolvePromise) => {
     const stdout = { text: "", truncated: false };
@@ -204,27 +254,20 @@ export async function runShell(input: ShellRunInput): Promise<ShellRunResult> {
     let settled = false;
     const child = spawn(executable, args, {
       cwd: absoluteCwd,
-      env: {
-        ...process.env,
-        CI: "1",
-        NO_COLOR: "1",
-        FORCE_COLOR: "0",
-        TERM: "dumb",
-        GIT_PAGER: "cat",
-        PAGER: "cat",
-      },
+      env: shellEnv(rtkRewrite),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       detached: !isWindows,
     });
-    const finish = (exitCode: number | null): void => {
+    const finish = async (exitCode: number | null): Promise<void> => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       input.signal?.removeEventListener("abort", onAbort);
       const durationMs = Date.now() - started;
       auditShell(input.root, {
-        command,
+        command: original,
+        ...(rtkRewrite ? { rtkCommand: rtkRewrite.command } : {}),
         cwd,
         exitCode,
         durationMs,
@@ -232,7 +275,7 @@ export async function runShell(input: ShellRunInput): Promise<ShellRunResult> {
         truncated: stdout.truncated || stderr.truncated,
       });
       resolvePromise({
-        command,
+        command: original,
         cwd,
         exitCode,
         stdout: stdout.text,
@@ -245,12 +288,12 @@ export async function runShell(input: ShellRunInput): Promise<ShellRunResult> {
     const onAbort = (): void => {
       timedOut = true;
       killTree(child);
-      finish(null);
+      void finish(null);
     };
     const timer = setTimeout(() => {
       timedOut = true;
       killTree(child);
-      finish(null);
+      void finish(null);
     }, timeoutMs);
     timer.unref?.();
     if (input.signal?.aborted) {
@@ -262,9 +305,9 @@ export async function runShell(input: ShellRunInput): Promise<ShellRunResult> {
     child.stderr?.on("data", (chunk: Buffer) => appendCapped(stderr, chunk.toString("utf8")));
     child.on("error", (error) => {
       appendCapped(stderr, error.message);
-      finish(-1);
+      void finish(-1);
     });
-    child.on("close", (code) => finish(code));
+    child.on("close", (code) => void finish(code));
   });
 }
 

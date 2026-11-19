@@ -97,6 +97,7 @@ function defaults(): StoredSettings {
       temperature: 0.2,
       maxTokens: 8000,
       maxWorkers: 0,
+      rtkCompression: false,
     },
     identity: {
       actorId: `user:${currentUserName()}:${ulid()}`,
@@ -250,6 +251,10 @@ function normalize(raw: unknown): StoredSettings {
           fallback.agent.maxWorkers,
         ),
       ),
+      rtkCompression:
+        typeof agent.rtkCompression === "boolean"
+          ? agent.rtkCompression
+          : fallback.agent.rtkCompression,
     },
     identity: {
       actorId:
@@ -461,6 +466,9 @@ export class SettingsStore {
     }
     if (typeof patch.agentMaxWorkers === "number") {
       raw.agent.maxWorkers = Math.round(clamp(patch.agentMaxWorkers, 0, 4, raw.agent.maxWorkers));
+    }
+    if (typeof patch.agentRtkCompression === "boolean") {
+      raw.agent.rtkCompression = patch.agentRtkCompression;
     }
     if (typeof patch.userName === "string" && patch.userName.trim()) {
       raw.identity.name = patch.userName.trim();
