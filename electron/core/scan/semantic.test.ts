@@ -307,6 +307,49 @@ describe("runSemanticPass AGENTS.md rules", () => {
     // can describe the subsystem instead of falling back to "contains N".
     expect(childFiles).toEqual(expect.arrayContaining(["record.ts", "merge.ts"]));
   });
+
+  it("reports unrefined modules instead of substituting a local summary", async () => {
+    globalThis.fetch = (async (_input: RequestInfo | URL) => {
+      return new Response(
+        JSON.stringify({
+          // Model refines the file but returns no module responsibilities.
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  files: [
+                    {
+                      path: "src/billing.ts",
+                      kind: "service",
+                      responsibility: "Charges cards.",
+                      domain: "billing",
+                    },
+                  ],
+                  modules: [],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const result = await runSemanticPass(scanFixture(), {
+      kind: "openai-compatible",
+      baseUrl: "https://x/v1",
+      model: "m",
+      apiKey: "k",
+    });
+
+    // The "src" L0 module got no model responsibility, so it must be reported as
+    // unrefined (for a manual retry) rather than silently given a local summary.
+    expect(result.hasUnrefined).toBe(true);
+    expect(result.unrefined.modules.some((node) => node.path === "src")).toBe(true);
+    const module = result.scan.nodes.find((node) => node.level === "L0");
+    // No local "Domain …: N source units" template was substituted.
+    expect(module?.responsibility).not.toMatch(/Domain .*source units/);
+  });
 });
 
 describe("member (facet) refinements", () => {

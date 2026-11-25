@@ -189,6 +189,7 @@ function emptyState(): AppState {
       edges: 0,
       message: t("scan.idle"),
       updatedAt: null,
+      semanticRetryPending: false,
     },
     lsp: [],
     tools: emptyTools(),
@@ -649,6 +650,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.refresh, async () => requireSession().refresh());
 
   ipcMain.handle(IPC_CHANNELS.scan, async () => requireSession().scan());
+
+  ipcMain.handle(IPC_CHANNELS.retrySemantic, async () => requireSession().retrySemantic());
 
   ipcMain.handle(IPC_CHANNELS.amendArchitecture, async (_event, versionId: unknown) => {
     if (typeof versionId !== "string" || !versionId) {

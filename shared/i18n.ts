@@ -961,6 +961,18 @@ const en = {
   "session.semanticSkippedReason.provider":
     "no AI provider configured — enable one in Settings to have node roles described",
   "session.semanticSkippedReason.toggle": "model-based refinement is turned off in Settings",
+  "session.semanticPartial":
+    "The model described most of the architecture, but {files} file(s) and {modules} module(s) were not described. They keep their structural text. Use “Retry description” to run the model over just those.",
+  "session.semanticComplete": "The model described the full architecture.",
+  "session.semanticPartialButton": "Retry description for the remaining nodes",
+  "session.semanticRetryTitle": "Retry architecture descriptions",
+  "session.semanticRetryGoal":
+    "Replace structural descriptions for {files} node(s) with model-generated roles.",
+  "session.semanticRetryTask": "Refine the remaining node responsibilities with the model.",
+  "session.semanticRetryReady":
+    "Description retry is ready for review: {added} added, {updated} updated, {removed} removed.",
+  "session.semanticRetryNoops":
+    "The model described all remaining nodes; no architecture changes were needed ({files} files, {nodes} nodes).",
   "session.approvalIncomplete": "Approval was written incompletely: {message}",
   "session.approvedArchitecture":
     "Approved architecture version {ordinal}. This was an architecture-only change, so no code implementation is needed.",
@@ -2081,6 +2093,17 @@ const zh: Record<MessageKey, string> = {
   "session.semanticSkippedReason.provider":
     "尚未配置 AI Provider——在设置中启用一项后才会描述节点角色",
   "session.semanticSkippedReason.toggle": "模型细化已在设置中关闭",
+  "session.semanticPartial":
+    "模型已描述大部分架构，但有 {files} 个文件和 {modules} 个模块未被描述，它们保留结构文本。可点击“重试描述”仅对这些部分重跑模型。",
+  "session.semanticComplete": "模型已描述完整架构。",
+  "session.semanticPartialButton": "对剩余节点重试描述",
+  "session.semanticRetryTitle": "重试架构描述",
+  "session.semanticRetryGoal": "为 {files} 个节点用模型生成的角色替换结构描述。",
+  "session.semanticRetryTask": "用模型细化剩余的节点职责。",
+  "session.semanticRetryReady":
+    "描述重试已可供审阅：新增 {added}，更新 {updated}，删除 {removed}。",
+  "session.semanticRetryNoops":
+    "模型已描述所有剩余节点，无需架构变更（{files} 个文件，{nodes} 个节点）。",
   "session.approvalIncomplete": "批准写入不完整：{message}",
   "session.approvedArchitecture": "已批准架构版本 {ordinal}。此变更仅涉及架构，无需代码实现。",
   "session.approvedVersion": "已批准版本 {ordinal}。{next}",

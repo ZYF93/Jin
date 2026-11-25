@@ -249,13 +249,7 @@ function ImplementationChecks({ version }: { version: VersionState }) {
   );
 }
 
-function VersionRow({
-  version,
-  current,
-}: {
-  version: VersionState;
-  current: boolean;
-}) {
+function VersionRow({ version, current }: { version: VersionState; current: boolean }) {
   const t = useT();
   const snapshot = useJin((state) => state.app?.snapshot);
   const app = useJin((state) => state.app);
@@ -335,7 +329,10 @@ function VersionRow({
         {intent && intent.tasks.length > 0 ? (
           <div className="mt-2 space-y-1">
             {intent.tasks.slice(0, 3).map((task) => (
-              <div key={task.id} className="flex items-start gap-1.5 text-[9px] text-[var(--faint)]">
+              <div
+                key={task.id}
+                className="flex items-start gap-1.5 text-[9px] text-[var(--faint)]"
+              >
                 <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-[var(--faint)]" />
                 <span>{task.title}</span>
               </div>
@@ -350,19 +347,21 @@ function VersionRow({
                 {t("intent.reconstructing")}
               </div>
             ) : replayError ? (
-              <div className="text-[9px] leading-relaxed text-[var(--danger)]">
-                {replayError}
-              </div>
+              <div className="text-[9px] leading-relaxed text-[var(--danger)]">{replayError}</div>
             ) : selectedReplay ? (
               <div className="inner-panel p-2">
                 <div className="flex items-center gap-2 text-[9px]">
-                  <span className="text-[var(--success)]">+{selectedReplay.diff.summary.added}</span>
-                  <span className="text-[var(--danger)]">−{selectedReplay.diff.summary.removed}</span>
-                  <span className="text-[var(--warning)]">~{selectedReplay.diff.summary.modified}</span>
+                  <span className="text-[var(--success)]">
+                    +{selectedReplay.diff.summary.added}
+                  </span>
+                  <span className="text-[var(--danger)]">
+                    −{selectedReplay.diff.summary.removed}
+                  </span>
+                  <span className="text-[var(--warning)]">
+                    ~{selectedReplay.diff.summary.modified}
+                  </span>
                   <span className="ml-auto text-[8px] text-[var(--faint)]">
-                    {selectedReplay.applied
-                      ? t("common.applied")
-                      : t("common.notApplied")}
+                    {selectedReplay.applied ? t("common.applied") : t("common.notApplied")}
                   </span>
                 </div>
                 <div className="mt-1 text-[8.5px] text-[var(--faint)]">
@@ -395,9 +394,7 @@ function VersionRow({
               onClick={() => void retryImplementation(version.id)}
             >
               <RotateCcw size={10} />
-              {version.implementations.length > 0
-                ? t("intent.reRun")
-                : t("intent.implement")}
+              {version.implementations.length > 0 ? t("intent.reRun") : t("intent.implement")}
             </button>
           ) : null}
         </div>
@@ -430,11 +427,7 @@ function HistorySection() {
       ) : (
         <div className="inner-panel overflow-hidden">
           {versions.map((version) => (
-            <VersionRow
-              key={version.id}
-              version={version}
-              current={version.id === current?.id}
-            />
+            <VersionRow key={version.id} version={version} current={version.id === current?.id} />
           ))}
         </div>
       )}
@@ -452,9 +445,7 @@ function DeliveryMetrics() {
       <div className="flex items-center gap-2">
         <Gauge size={11} className="text-[var(--accent)]" />
         <span className="panel-title">{t("intent.deliveryMetrics")}</span>
-        <span className="ml-auto text-[8px] text-[var(--faint)]">
-          {t("intent.localUsage")}
-        </span>
+        <span className="ml-auto text-[8px] text-[var(--faint)]">{t("intent.localUsage")}</span>
       </div>
       <div className="mt-2 grid grid-cols-2 gap-px overflow-hidden rounded-md bg-[var(--border)]">
         <div className="bg-[var(--panel-solid)] px-2.5 py-2">
@@ -474,9 +465,7 @@ function DeliveryMetrics() {
           <div className="text-[8px] tracking-wide text-[var(--faint)] uppercase">
             {t("intent.driftRate")}
           </div>
-          <div className="font-mono-ui mt-0.5 text-[12px] font-bold">
-            {formatRate(drift.rate)}
-          </div>
+          <div className="font-mono-ui mt-0.5 text-[12px] font-bold">{formatRate(drift.rate)}</div>
           <div className="mt-0.5 text-[8px] text-[var(--faint)]">
             {drift.implemented > 0
               ? t("intent.implementedCount", {
@@ -490,9 +479,7 @@ function DeliveryMetrics() {
           <div className="text-[8px] tracking-wide text-[var(--faint)] uppercase">
             {t("intent.reusePass")}
           </div>
-          <div className="font-mono-ui mt-0.5 text-[12px] font-bold">
-            {formatRate(reuse.rate)}
-          </div>
+          <div className="font-mono-ui mt-0.5 text-[12px] font-bold">{formatRate(reuse.rate)}</div>
           <div className="mt-0.5 text-[8px] text-[var(--faint)]">
             {reuse.applicable > 0
               ? t("intent.reuseApplicable", {
@@ -531,6 +518,7 @@ function ProjectHealth() {
   const openSettings = useJin((state) => state.openSettings);
   const busy = useJin((state) => state.busy);
   const mergeIntent = useJin((state) => state.mergeIntent);
+  const retrySemantic = useJin((state) => state.retrySemantic);
   if (!app) return null;
   const missing = app.lsp.filter((server) => server.status === "missing");
   const warnings = [...new Set([...app.wal.warnings, ...(app.fold?.warnings ?? [])])];
@@ -580,6 +568,16 @@ function ProjectHealth() {
         <ScanSearch size={10} />
         {app.scan.message}
       </div>
+      {app.scan.semanticRetryPending ? (
+        <button
+          className="flex w-full items-center gap-1.5 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-2 py-1.5 text-left text-[9.5px] text-[var(--muted)] transition-colors hover:border-amber-400/40 hover:bg-amber-400/[0.1] disabled:opacity-50"
+          onClick={() => void retrySemantic()}
+          disabled={busy === t("busy.scanning")}
+        >
+          <ScanSearch size={11} className="shrink-0 text-amber-500" />
+          {t("session.semanticPartialButton")}
+        </button>
+      ) : null}
 
       <DeliveryMetrics />
 
@@ -668,9 +666,7 @@ export function IntentPanel() {
           <div className="inner-panel p-3">
             <div className="flex items-center gap-2">
               <ShieldCheck size={13} className="text-[var(--success)]" />
-              <span className="text-[10.5px] font-bold">
-                {t("intent.latestApproval")}
-              </span>
+              <span className="text-[10.5px] font-bold">{t("intent.latestApproval")}</span>
               <span className="chip chip-success ml-auto h-[18px] px-1.5 text-[8px]">
                 {t("intent.approved")}
               </span>
@@ -696,12 +692,8 @@ export function IntentPanel() {
           <div className="inner-panel flex items-center gap-2 p-3">
             <XCircle size={13} className="text-[var(--danger)]" />
             <div className="min-w-0 flex-1">
-              <div className="text-[10px] font-semibold">
-                {t("intent.latestRejected")}
-              </div>
-              <div className="truncate text-[9px] text-[var(--faint)]">
-                {proposal.intent.title}
-              </div>
+              <div className="text-[10px] font-semibold">{t("intent.latestRejected")}</div>
+              <div className="truncate text-[9px] text-[var(--faint)]">{proposal.intent.title}</div>
             </div>
           </div>
         ) : null}
@@ -716,12 +708,8 @@ export function IntentPanel() {
               {t("intent.startDetail")}
             </p>
             <div className="mt-2.5 flex flex-wrap gap-1">
-              <span className="chip h-[19px] text-[8px]">
-                {t("intent.exampleFeature")}
-              </span>
-              <span className="chip h-[19px] text-[8px]">
-                {t("intent.exampleRefactor")}
-              </span>
+              <span className="chip h-[19px] text-[8px]">{t("intent.exampleFeature")}</span>
+              <span className="chip h-[19px] text-[8px]">{t("intent.exampleRefactor")}</span>
               <span className="chip h-[19px] text-[8px]">{t("intent.exampleDrift")}</span>
             </div>
           </div>
@@ -752,10 +740,7 @@ export function IntentPanel() {
                 </div>
               ))}
             </div>
-            <button
-              className="btn mt-2 h-7 w-full text-[9px]"
-              onClick={() => setReviewOpen(true)}
-            >
+            <button className="btn mt-2 h-7 w-full text-[9px]" onClick={() => setReviewOpen(true)}>
               {t("intent.inspectReview")}
             </button>
           </details>

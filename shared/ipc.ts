@@ -315,6 +315,11 @@ export interface ScanStatus {
   edges: number;
   message: string;
   updatedAt: string | null;
+  /**
+   * True when the last semantic pass left at least one node with a structural
+   * (non-LLM) description, so the user can retry just those units.
+   */
+  semanticRetryPending: boolean;
 }
 
 export type LspAvailability = "available" | "missing" | "unknown";
@@ -624,6 +629,7 @@ export const IPC_CHANNELS = {
   chooseProjectDirectory: "jin:choose-project-directory",
   refresh: "jin:refresh",
   scan: "jin:scan",
+  retrySemantic: "jin:retry-semantic",
   amendArchitecture: "jin:amend-architecture",
   mergeIntent: "jin:merge-intent",
   sendMessage: "jin:send-message",
@@ -681,6 +687,8 @@ export interface JinBridge {
   chooseProjectDirectory(): Promise<string | null>;
   refresh(): Promise<AppState>;
   scan(): Promise<AppState>;
+  /** Re-run the LLM description over units the last semantic pass could not refine. */
+  retrySemantic(): Promise<AppState>;
   /** Draft an architecture and code repair for a version whose implementation drifted. */
   amendArchitecture(versionId: string): Promise<AppState>;
   /** Draft a merge intent for versions the fold skipped after a Git merge. */

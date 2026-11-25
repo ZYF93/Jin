@@ -269,6 +269,7 @@ function emptyScanStatus(message: string): ScanStatus {
     edges: 0,
     message,
     updatedAt: null,
+    semanticRetryPending: false,
   };
 }
 
@@ -337,6 +338,12 @@ export class ProjectSession {
   private lastCheckpointVersionId: string | null = null;
   /** Images attached to the most recent user turn, forwarded to implementations. */
   private lastUserImages: import("./agent/provider").ImageAttachment[] = [];
+  /**
+   * Units (L0 modules / L1 files / facets) the semantic pass could not refine
+   * with an LLM answer. Held so `retrySemantic` can re-run only those; null
+   * when the last semantic pass was fully LLM-described.
+   */
+  private pendingSemanticUnrefined: import("./scan/semantic").SemanticUnrefined | null = null;
   private closed = false;
   private branch: string | null = null;
   /** Record ids this process just appended; a watcher echo must not look like a pull. */
@@ -1073,6 +1080,7 @@ export class ProjectSession {
       edges: scan.stats.edges,
       message: this.scanStatusSummary(scan, lspFacts),
       updatedAt: scan.scannedAt,
+      semanticRetryPending: this.scanStatus.semanticRetryPending,
     };
     this.emitState();
     return scan;
@@ -1575,6 +1583,7 @@ export class ProjectSession {
       phase: "scanning",
       message: this.t("scan.scanning"),
     };
+    this.pendingSemanticUnrefined = null;
     this.emitState();
     this.abortController = new AbortController();
     try {
@@ -1599,6 +1608,9 @@ export class ProjectSession {
         });
         scan = semantic.scan;
         if (semantic.warnings.length > 0) scan.warnings.push(...semantic.warnings);
+        // Units the LLM did not describe are kept with their structural text
+        // and surfaced to the user for a manual retry — no local stand-in.
+        this.pendingSemanticUnrefined = semantic.hasUnrefined ? semantic.unrefined : null;
         if (semantic.summary) {
           semanticSummary = semantic.summary;
           this.rag.update(this.root, scan, this.snapshot);
@@ -1613,8 +1625,21 @@ export class ProjectSession {
           edges: scan.stats.edges,
           message: this.scanStatusSummary(scan),
           updatedAt: scan.scannedAt,
+          semanticRetryPending: semantic.hasUnrefined,
         };
         this.emitState();
+        if (semantic.hasUnrefined) {
+          // Tell the user which parts were not LLM-described so they can
+          // retry instead of silently accepting local templates.
+          this.addMessage(
+            "assistant",
+            "scan",
+            this.t("session.semanticPartial", {
+              files: semantic.unrefined.files.length,
+              modules: semantic.unrefined.modules.length,
+            }),
+          );
+        }
       } else if (semanticOn) {
         // The user wanted semantic refinement but it was not applied (no
         // provider configured, or the toggle is off for a non-initial scan),
@@ -1754,6 +1779,147 @@ export class ProjectSession {
 
   async amendArchitecture(versionId: string): Promise<AppState> {
     return this.scan({ amendmentOf: versionId });
+  }
+
+  /**
+   * Re-run only the units the last semantic pass left un-described (L0 modules
+   * / L1 files / facets the model did not refine). A no-op when there is
+   * nothing pending, so the button can be shown and disabled cheaply.
+   */
+  async retrySemantic(): Promise<AppState> {
+    const pending = this.pendingSemanticUnrefined;
+    if (!pending || (pending.files.length === 0 && pending.modules.length === 0)) {
+      return this.getState();
+    }
+    if (this.proposal?.status === "in_review") {
+      throw new Error(this.t("error.rescanBlocked"));
+    }
+    const settings = this.deps.settings.get();
+    const provider = this.deps.settings.providerConfig();
+    if (!isProviderConfigured(provider)) {
+      throw new Error(this.t("error.providerRequired"));
+    }
+    this.scanStatus = {
+      ...this.scanStatus,
+      phase: "scanning",
+      message: this.t("scan.refining"),
+    };
+    this.emitState();
+    this.abortController = new AbortController();
+    try {
+      // Re-scan structural facts so the pending set stays consistent with the
+      // current source, then refine only the un-described units.
+      let scan = await this.refreshFacts(this.abortController.signal);
+      const semantic = await runSemanticPass(scan, provider as ProviderConfig, {
+        signal: this.abortController.signal,
+        temperature: settings.agent.temperature,
+        maxTokens: Math.min(settings.agent.maxTokens, 6000),
+        rules: this.agentRules(),
+        onUsage: (usage) => this.recordUsage("semantic", provider.model, usage),
+        only: {
+          files: pending.files.map((file) => file.path),
+          modules: pending.modules
+            .map((node) => node.path)
+            .filter((path): path is string => Boolean(path)),
+        },
+      });
+      scan = semantic.scan;
+      if (semantic.warnings.length > 0) scan.warnings.push(...semantic.warnings);
+      this.pendingSemanticUnrefined = semantic.hasUnrefined ? semantic.unrefined : null;
+      this.scanResult = scan;
+      this.rag.update(this.root, scan, this.snapshot);
+      this.scanStatus = {
+        ...this.scanStatus,
+        phase: "ready",
+        files: scan.stats.files,
+        symbols: scan.stats.symbols,
+        nodes: scan.stats.nodes,
+        edges: scan.stats.edges,
+        message: this.scanStatusSummary(scan),
+        updatedAt: scan.scannedAt,
+        semanticRetryPending: semantic.hasUnrefined,
+      };
+      this.emitState();
+      if (semantic.hasUnrefined) {
+        this.addMessage(
+          "assistant",
+          "scan",
+          this.t("session.semanticPartial", {
+            files: semantic.unrefined.files.length,
+            modules: semantic.unrefined.modules.length,
+          }),
+        );
+      } else {
+        this.addMessage("assistant", "scan", this.t("session.semanticComplete"));
+      }
+      // Carry the refined responsibilities into the pending/next architecture
+      // ops so the LLM text reaches the review instead of the templates.
+      const importResult = diffScanToOps(this.snapshot, scan);
+      if (importResult.ops.length > 0) {
+        const intent: Intent = {
+          id: ulid(),
+          versionId: ulid(),
+          title: this.t("session.semanticRetryTitle"),
+          goal: this.t("session.semanticRetryGoal", {
+            files: importResult.addedNodes + importResult.updatedNodes,
+          }),
+          tasks: [
+            {
+              id: ulid(),
+              title: this.t("session.semanticRetryTask"),
+              status: "pending",
+              dependsOn: [],
+              acceptance: [],
+            },
+          ],
+          nodeIntents: scanNodeIntents(scan.nodes),
+          author: this.currentActor(),
+          createdAt: nowIso(),
+          mode: "architecture",
+        };
+        const proposal = this.makeProposal(intent, importResult.ops, [], null);
+        proposal.architectureOnly = true;
+        this.proposal = proposal;
+        this.addMessage(
+          "assistant",
+          "proposal",
+          this.t("session.semanticRetryReady", {
+            added: importResult.addedNodes,
+            updated: importResult.updatedNodes,
+            removed: importResult.removedNodes,
+          }),
+          { proposalId: proposal.id },
+        );
+      } else {
+        this.addMessage(
+          "assistant",
+          "scan",
+          this.t("session.semanticRetryNoops", {
+            files: scan.stats.files,
+            nodes: scan.stats.nodes,
+          }),
+        );
+      }
+      this.emitState();
+      return this.getState();
+    } catch (error) {
+      this.scanStatus = {
+        ...this.scanStatus,
+        phase: "failed",
+        message: error instanceof Error ? error.message : String(error),
+      };
+      this.addMessage(
+        "assistant",
+        "error",
+        this.t("session.scanFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      this.emitState();
+      return this.getState();
+    } finally {
+      this.abortController = null;
+    }
   }
 
   /**

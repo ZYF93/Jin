@@ -35,6 +35,7 @@ const bridge: JinBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.chooseProjectDirectory) as Promise<string | null>,
   refresh: () => ipcRenderer.invoke(IPC_CHANNELS.refresh) as Promise<AppState>,
   scan: () => ipcRenderer.invoke(IPC_CHANNELS.scan) as Promise<AppState>,
+  retrySemantic: () => ipcRenderer.invoke(IPC_CHANNELS.retrySemantic) as Promise<AppState>,
   amendArchitecture: (versionId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.amendArchitecture, versionId) as Promise<AppState>,
   mergeIntent: () => ipcRenderer.invoke(IPC_CHANNELS.mergeIntent) as Promise<AppState>,

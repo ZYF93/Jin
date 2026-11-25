@@ -35,7 +35,35 @@ const MAX_RESPONSIBILITY = 280;
 const MAX_DOMAIN = 48;
 const MAX_SYMBOLS = 24;
 const MAX_FILES = 160;
+const MAX_MODULES = 80;
 const MAX_MEMBERS_PER_FILE = 10;
+/** Units per batch so a large project is refined in several model calls. */
+const BATCH_FILES = 40;
+const BATCH_MODULES = 20;
+/** A single batch must be retried this many times before it is marked failed. */
+const MAX_BATCH_ATTEMPTS = 3;
+
+/** Split a list of paths into consecutive batches of at most `size`. */
+function chunkBySize<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let start = 0; start < items.length; start += size) {
+    out.push(items.slice(start, start + size));
+  }
+  return out;
+}
+
+function delayMs(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(), ms);
+    if (!signal) return;
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 export interface SemanticMemberRefinement {
   name: string;
@@ -68,6 +96,15 @@ export interface SemanticPassResult {
   scan: ScanResult;
   summary: string;
   warnings: string[];
+  /** True when at least one unit still carries a local (non-LLM) responsibility. */
+  hasUnrefined: boolean;
+  /** The units the LLM did not refine, with their local responsibilities. */
+  unrefined: SemanticUnrefined;
+}
+
+export interface SemanticUnrefined {
+  files: ScanResult["files"];
+  modules: ScanResult["nodes"][number][];
 }
 
 export interface SemanticPassOptions {
@@ -75,10 +112,23 @@ export interface SemanticPassOptions {
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
+  /** How many times a single batch call is retried before it is marked failed. */
+  maxRetries?: number;
   onUsage?: (usage: ProviderTokenUsage) => void;
   /** AGENTS.md rules (project + global) that the refinement must respect. */
   rules?: string;
+  /**
+   * Restrict the pass to these unit paths (a retry over only the units a prior
+   * pass left structural). When omitted, every capped unit is refined.
+   */
+  only?: { files: string[]; modules: string[] };
 }
+
+/**
+ * Retry a single batch call with the same backoff cadence the chat planner
+ * uses: two automatic retries after a 300ms / 800ms wait. Honours abort.
+ */
+const RETRY_DELAYS_MS = [300, 800] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -235,10 +285,11 @@ function isScanModule(node: ScanResult["nodes"][number]): boolean {
 }
 
 /**
- * Apply validated semantic refinements to both source facts and the L0/L1
- * drafts. L0 IDs stay path-derived so a semantic pass cannot destabilize the
- * architecture; domains are attached as metadata and summarized on the
- * containing modules.
+ * Apply validated, LLM-only semantic refinements to both source facts and the
+ * L0/L1/facet drafts. No local template is substituted: any unit the model
+ * did not refine is left untouched so callers can see exactly which parts are
+ * not yet LLM-described. L0 IDs stay path-derived so a semantic pass cannot
+ * destabilize the architecture.
  */
 export function applySemanticRefinement(
   scan: ScanResult,
@@ -262,27 +313,22 @@ export function applySemanticRefinement(
     };
   });
 
-  const domainByPath = new Map<string, string>();
-  for (const file of refinement.files) {
-    if (file.domain) domainByPath.set(file.path, file.domain);
-  }
-
   const nodes = scan.nodes.map((node) => {
+    // L0 modules: only take the model's responsibility / domain. No local
+    // "Domain X: N units" summary is generated anymore.
     if (isScanModule(node)) {
       const module = moduleByPath.get(node.path);
-      if (module) {
-        refined += 1;
-        return {
-          ...node,
-          responsibility: module.responsibility ?? node.responsibility,
-          metadata: {
-            ...node.metadata,
-            semantic: true,
-            ...(module.domain ? { domains: [module.domain] } : {}),
-            ...(module.domain ? { domain: module.domain } : {}),
-          },
-        };
-      }
+      if (!module) return node;
+      refined += 1;
+      return {
+        ...node,
+        ...(module.responsibility ? { responsibility: module.responsibility } : {}),
+        metadata: {
+          ...node.metadata,
+          semantic: true,
+          ...(module.domain ? { domains: [module.domain], domain: module.domain } : {}),
+        },
+      };
     }
     if (node.level === "facet" && node.path) {
       const match = byPath.get(node.path);
@@ -300,6 +346,8 @@ export function applySemanticRefinement(
       if (!match) return node;
       const structuralKind =
         typeof node.metadata.scanKind === "string" ? node.metadata.scanKind : node.kind;
+      // A file refinement already counted the unit via scan.files; the L1 node
+      // mirrors it, so it does not increment `refined` a second time.
       return {
         ...node,
         kind: match.kind ?? node.kind,
@@ -313,35 +361,7 @@ export function applySemanticRefinement(
         },
       };
     }
-
-    if (!isScanModule(node)) return node;
-    const prefix = `${node.path}/`;
-    const domains = new Set<string>();
-    let count = 0;
-    for (const [path, domain] of domainByPath) {
-      if (path === node.path || path.startsWith(prefix)) {
-        domains.add(domain);
-        count += 1;
-      }
-    }
-    if (domains.size === 0) return node;
-    const sorted = [...domains].sort();
-    const summary =
-      sorted.length === 1
-        ? `Domain ${sorted[0]}: ${count} source unit${count === 1 ? "" : "s"} in ${node.name}.`
-        : `Domains ${sorted.slice(0, 4).join(", ")}${sorted.length > 4 ? "…" : ""}: ${count} source units in ${node.name}.`;
-    return {
-      ...node,
-      responsibility: moduleByPath.get(node.path)?.responsibility ?? summary,
-      metadata: {
-        ...node.metadata,
-        semantic: true,
-        domains: sorted.slice(0, 12),
-        ...(moduleByPath.get(node.path)?.domain
-          ? { domain: moduleByPath.get(node.path)?.domain }
-          : {}),
-      },
-    };
+    return node;
   });
 
   return {
@@ -351,6 +371,25 @@ export function applySemanticRefinement(
       nodes,
     },
     refined,
+  };
+}
+
+/**
+ * Units that still carry a local (non-LLM) responsibility after the pass. A
+ * file is unrefined when the model returned no refinement for its path; an
+ * L0 module is unrefined when the model returned no module entry for its path.
+ */
+export function unrefinedUnits(
+  scan: ScanResult,
+  refinement: SemanticRefinement,
+): SemanticUnrefined {
+  const refinedFiles = new Set(refinement.files.map((file) => file.path));
+  const refinedModules = new Set(refinement.modules.map((module) => module.path));
+  return {
+    files: scan.files.filter((file) => !refinedFiles.has(file.path)),
+    modules: scan.nodes.filter(
+      (node) => isScanModule(node) && !refinedModules.has(node.path ?? ""),
+    ),
   };
 }
 
@@ -364,7 +403,7 @@ function importPathToName(scan: ScanResult, specifier: string): string {
   return base;
 }
 
-function promptFiles(scan: ScanResult): Array<Record<string, unknown>> {
+function promptFiles(scan: ScanResult, files: ScanResult["files"]): Array<Record<string, unknown>> {
   const dependents = new Map<string, string[]>();
   for (const file of scan.files) {
     for (const specifier of file.imports.slice(0, EDGE_LIMITS.imports)) {
@@ -377,7 +416,7 @@ function promptFiles(scan: ScanResult): Array<Record<string, unknown>> {
       dependents.set(target, list);
     }
   }
-  return scan.files.slice(0, MAX_FILES).map((file) => ({
+  return files.map((file) => ({
     path: file.path,
     language: file.language,
     currentKind: file.kind,
@@ -391,7 +430,10 @@ function promptFiles(scan: ScanResult): Array<Record<string, unknown>> {
   }));
 }
 
-function promptModules(scan: ScanResult): Array<Record<string, unknown>> {
+function promptModules(
+  scan: ScanResult,
+  modules: ScanResult["nodes"][number][],
+): Array<Record<string, unknown>> {
   const byDir = new Map<string, string[]>();
   for (const file of scan.files) {
     const dir = file.path.slice(0, file.path.lastIndexOf("/"));
@@ -412,15 +454,12 @@ function promptModules(scan: ScanResult): Array<Record<string, unknown>> {
     }
     return [...names].sort().slice(0, 12);
   };
-  return scan.nodes
-    .filter(isScanModule)
-    .slice(0, 40)
-    .map((node) => ({
-      path: node.path,
-      name: node.name,
-      kind: node.kind,
-      childFiles: moduleFiles(node.path ?? ""),
-    }));
+  return modules.map((node) => ({
+    path: node.path,
+    name: node.name,
+    kind: node.kind,
+    childFiles: moduleFiles(node.path ?? ""),
+  }));
 }
 
 const SYSTEM_PROMPT = `You are Jin's semantic architecture pass. You do not write code and you never invent files.
@@ -441,9 +480,12 @@ Return strict JSON only:
 {"files":[{"path":"src/example.ts","kind":"service","responsibility":"Charges a saved payment method and records the result.","domain":"billing","symbols":["charge"],"members":[{"name":"charge","responsibility":"Validates the saved card, creates the charge, and records the ledger entry."}]}],"modules":[{"path":"src/billing","responsibility":"Coordinates payment creation, refunds, and invoice state for the storefront.","domain":"billing"}]}`;
 
 /**
- * Run one bounded semantic pass over a structural scan. Failure is non-fatal:
- * scanning must still work with an unavailable or flaky provider, so callers
- * receive the original facts plus a warning.
+ * Run one semantic pass over a structural scan. Units are processed in
+ * batches so a large project is refined across several model calls; each
+ * batch is retried (two automatic attempts) exactly like the chat planner.
+ * No local template substitutes for a missing LLM answer: anything the model
+ * did not refine is reported back in `unrefined` so the UI can tell the user
+ * what was described and what still needs a retry.
  */
 export async function runSemanticPass(
   scan: ScanResult,
@@ -451,62 +493,155 @@ export async function runSemanticPass(
   options: SemanticPassOptions = {},
 ): Promise<SemanticPassResult> {
   if (scan.files.length === 0 || !isProviderConfigured(provider)) {
-    return { scan, summary: "", warnings: [] };
-  }
-
-  const user = JSON.stringify(
-    {
-      files: promptFiles(scan),
-      modules: promptModules(scan),
-      omittedFiles: Math.max(0, scan.files.length - MAX_FILES),
-    },
-    null,
-    2,
-  );
-
-  try {
-    const system = options.rules?.trim()
-      ? `${SYSTEM_PROMPT}\n\nPROJECT RULES (AGENTS.md):\n${options.rules.trim()}`
-      : SYSTEM_PROMPT;
-    const json = await completeJson(provider, system, user, {
-      temperature: options.temperature ?? 0.2,
-      maxTokens: options.maxTokens ?? 4000,
-      timeoutMs: options.timeoutMs ?? 60_000,
-      json: true,
-      phase: "scan",
-      signal: options.signal,
-      onUsage: options.onUsage,
-    });
-    const refinement = parseSemanticRefinement(json, scan);
-    const applied = applySemanticRefinement(scan, refinement);
-    if (applied.refined === 0) {
-      return {
-        scan,
-        summary: "",
-        warnings: [
-          "Semantic pass completed, but no file or module refinement passed validation.",
-          ...refinement.warnings,
-        ],
-      };
-    }
-    const domains = new Set(
-      refinement.files
-        .map((file) => file.domain)
-        .filter((domain): domain is string => Boolean(domain)),
-    );
-    return {
-      scan: applied.scan,
-      summary: `Semantic pass refined ${applied.refined} project node${applied.refined === 1 ? "" : "s"} across ${domains.size} domain${domains.size === 1 ? "" : "s"}.`,
-      warnings: refinement.warnings,
-    };
-  } catch (error) {
-    if (options.signal?.aborted) throw error;
-    const message =
-      error instanceof ProviderError || error instanceof Error ? error.message : String(error);
     return {
       scan,
       summary: "",
-      warnings: [`Semantic pass failed; structural facts were kept: ${message}`],
+      warnings: [],
+      hasUnrefined: false,
+      unrefined: { files: [], modules: [] },
     };
   }
+
+  const system = options.rules?.trim()
+    ? `${SYSTEM_PROMPT}\n\nPROJECT RULES (AGENTS.md):\n${options.rules.trim()}`
+    : SYSTEM_PROMPT;
+
+  // Units to send to the model, capped by the per-call budget and chunked so a
+  // single model call stays small enough to complete reliably. A retry passes
+  // `only` to refine just the units a prior pass left structural.
+  const onlyFiles = options.only ? new Set(options.only.files) : null;
+  const onlyModules = options.only ? new Set(options.only.modules) : null;
+  const targetFiles = scan.files
+    .filter((file) => !onlyFiles || onlyFiles.has(file.path))
+    .slice(0, MAX_FILES);
+  const targetModules = scan.nodes
+    .filter(isScanModule)
+    .filter((node) => !onlyModules || onlyModules.has(node.path ?? ""))
+    .slice(0, MAX_MODULES);
+  const fileBatches = chunkBySize(targetFiles, BATCH_FILES);
+  const moduleBatches = chunkBySize(targetModules, BATCH_MODULES);
+
+  const fileRefinements: SemanticFileRefinement[] = [];
+  const moduleRefinements: SemanticModuleRefinement[] = [];
+  const warnings: string[] = [];
+  let completed = 0;
+  let failedBatches = 0;
+
+  const runBatch = async (
+    label: string,
+    user: string,
+    onOk: (json: Record<string, unknown>) => void,
+  ): Promise<void> => {
+    const maxAttempts = options.maxRetries ?? MAX_BATCH_ATTEMPTS;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (options.signal?.aborted) return;
+      try {
+        const json = await completeJson(provider, system, user, {
+          temperature: options.temperature ?? 0.2,
+          maxTokens: options.maxTokens ?? 4000,
+          timeoutMs: options.timeoutMs ?? 60_000,
+          json: true,
+          phase: "scan",
+          signal: options.signal,
+          onUsage: options.onUsage,
+        });
+        onOk(json);
+        completed += 1;
+        return;
+      } catch (error) {
+        if (options.signal?.aborted) return;
+        if (attempt === maxAttempts - 1) {
+          failedBatches += 1;
+          const message =
+            error instanceof ProviderError || error instanceof Error
+              ? error.message
+              : String(error);
+          warnings.push(
+            `Semantic batch ${label} failed after ${attempt + 1} attempt(s); its units keep their structural description: ${message}`,
+          );
+          return;
+        }
+        await delayMs(RETRY_DELAYS_MS[attempt] ?? 300, options.signal);
+      }
+    }
+  };
+
+  for (const batch of fileBatches) {
+    if (options.signal?.aborted) break;
+    await runBatch(
+      "files",
+      JSON.stringify(
+        {
+          files: promptFiles(scan, batch),
+          modules: [],
+          batch: `files ${batch.length}/${fileBatches.length}`,
+        },
+        null,
+        2,
+      ),
+      (json) => {
+        fileRefinements.push(...parseSemanticRefinement(json, scan).files);
+      },
+    );
+  }
+
+  for (const batch of moduleBatches) {
+    if (options.signal?.aborted) break;
+    await runBatch(
+      "modules",
+      JSON.stringify(
+        {
+          files: [],
+          modules: promptModules(scan, batch),
+          batch: `modules ${batch.length}/${moduleBatches.length}`,
+        },
+        null,
+        2,
+      ),
+      (json) => {
+        moduleRefinements.push(...parseSemanticRefinement(json, scan).modules);
+      },
+    );
+  }
+
+  const refinement: SemanticRefinement = {
+    files: fileRefinements,
+    modules: moduleRefinements,
+    warnings,
+  };
+  const applied = applySemanticRefinement(scan, refinement);
+  // On a retry (`only`), scope the unrefined report to the units this pass was
+  // asked to refine; otherwise every previously-good unit would be flagged.
+  let unrefined = unrefinedUnits(applied.scan, refinement);
+  if (onlyFiles || onlyModules) {
+    unrefined = {
+      files: unrefined.files.filter((file) => !onlyFiles || onlyFiles.has(file.path)),
+      modules: unrefined.modules.filter((node) => !onlyModules || onlyModules.has(node.path ?? "")),
+    };
+  }
+  const unrefinedCount = unrefined.files.length + unrefined.modules.length;
+
+  const domains = new Set(
+    refinement.files
+      .map((file) => file.domain)
+      .filter((domain): domain is string => Boolean(domain)),
+  );
+  let total =
+    completed > 0
+      ? `Semantic pass refined ${applied.refined} project node${applied.refined === 1 ? "" : "s"} across ${domains.size} domain${domains.size === 1 ? "" : "s"}.`
+      : "Semantic pass produced no refinement.";
+  if (failedBatches > 0) {
+    total += ` ${failedBatches} batch(es) failed after retries.`;
+  }
+  if (unrefinedCount > 0) {
+    total += ` ${unrefinedCount} unit(s) still carry a structural description.`;
+  }
+
+  return {
+    scan: applied.scan,
+    summary: total,
+    warnings: refinement.warnings,
+    hasUnrefined: unrefinedCount > 0,
+    unrefined,
+  };
 }

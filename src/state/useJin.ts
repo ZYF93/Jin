@@ -110,6 +110,8 @@ interface JinStore {
   closeProject: () => Promise<void>;
   refresh: () => Promise<void>;
   scan: () => Promise<void>;
+  /** Retry the LLM description over units the last semantic pass left structural. */
+  retrySemantic: () => Promise<void>;
   amendArchitecture: (versionId: string) => Promise<void>;
   mergeIntent: () => Promise<void>;
   sendMessage: (text: string, images?: string[]) => Promise<void>;
@@ -463,6 +465,10 @@ export const useJin = create<JinStore>((set, get) => {
 
     scan: async () => {
       await execute(t("busy.scanning"), () => window.jin.scan());
+    },
+
+    retrySemantic: async () => {
+      await execute(t("busy.scanning"), () => window.jin.retrySemantic());
     },
 
     amendArchitecture: async (versionId) => {
