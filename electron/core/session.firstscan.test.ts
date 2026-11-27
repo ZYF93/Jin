@@ -157,5 +157,26 @@ describe("first scan via architecture design agent", () => {
     expect(
       (session.getState() as { scan: { firstScanComplete: boolean } }).scan.firstScanComplete,
     ).toBe(true);
+    // No proposal/approval is created for a completed first scan.
+    expect((session as unknown as { proposal: unknown }).proposal ?? null).toBe(null);
+  });
+
+  it("keeps a failed first-scan retry blocked without offering approval", async () => {
+    // Both the scan and the retry leave nodes undescribed (model keeps failing).
+    const session = makeSession(makeDesigner(false));
+    await session.scan();
+    const deps = session as unknown as { deps: { designArchitecture?: unknown } };
+    deps.deps.designArchitecture = makeDesigner(false);
+    await session.retrySemantic();
+
+    const state = session.getState() as {
+      scan: { firstScanComplete: boolean; semanticRetryPending: boolean };
+      proposal: { status: string } | null;
+    };
+    expect(state.scan.firstScanComplete).toBe(false);
+    // Still blocked: chat must be refused.
+    await expect(session.sendMessage("hello")).rejects.toThrow(/first scan/i);
+    // Crucially: NO approval proposal is offered while the first scan is pending.
+    expect(state.proposal ?? null).toBe(null);
   });
 });

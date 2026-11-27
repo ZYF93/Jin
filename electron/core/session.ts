@@ -2095,6 +2095,24 @@ export class ProjectSession {
         semanticRetryPending: hasUnrefined,
       };
       this.emitState();
+
+      // A first scan that is still incomplete must NOT offer an approval:
+      // it stays blocked with a "retry" affordance until the model fully
+      // describes the architecture.
+      if (isFirstScan) {
+        this.addMessage(
+          "assistant",
+          "scan",
+          this.t("session.firstScanFailed", {
+            files: this.pendingSemanticUnrefined!.files.length,
+            modules: this.pendingSemanticUnrefined!.modules.length,
+            reason: this.semanticFailureReason(scan.warnings),
+          }),
+          { action: "retry-scan" },
+        );
+        return this.getState();
+      }
+
       if (hasUnrefined) {
         this.addMessage(
           "assistant",

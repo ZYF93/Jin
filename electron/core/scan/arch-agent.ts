@@ -19,7 +19,7 @@ import { stableIds } from "../ids/stable";
  * the *design* — grouping, kinds, responsibilities and domains.
  */
 
-const MAX_EKO_STEPS = 40;
+const MAX_EKO_STEPS = 60;
 const MAX_DESIGN_NODES = 400;
 const MAX_RESPONSIBILITY = 280;
 const MAX_DOMAIN = 48;
@@ -471,7 +471,12 @@ export async function runArchitectureDesignAgent(
   ]
     .filter(Boolean)
     .join("\n");
-  const task = ["Design the architecture for this project and submit it.", "", context].join("\n");
+  const task = [
+    "Design the architecture for this project and submit it.",
+    "Read only as much as you need to understand each unit's role; do not read every file. Then call submit_architecture ONCE — even a partial design is better than none.",
+    "You must finish by calling submit_architecture. If you have read enough, submit now.",
+    context,
+  ].join("\n");
 
   let moduleConfig = module.config;
   if (!configuredEkoModules.has(module)) {
@@ -526,6 +531,7 @@ export async function runArchitectureDesignAgent(
     },
   });
 
+  let lastError = "";
   try {
     await eko.initContext(workflow, { datetime: new Date().toISOString() });
     const onAbort = (): void => {
@@ -533,12 +539,24 @@ export async function runArchitectureDesignAgent(
     };
     input.signal.addEventListener("abort", onAbort, { once: true });
     try {
-      const result = await eko.execute(taskId);
+      let result = await eko.execute(taskId);
+      // If the agent ended without submitting, give it one nudge to submit a
+      // partial design before we give up. A truncated/failed run otherwise
+      // leaves every node undescribed.
+      if (submittedNodes().length === 0 && !input.signal.aborted && result.stopReason !== "abort") {
+        warnings.push(
+          `Architecture agent did not submit; nudging. Stop reason: ${result.stopReason || "unknown"}. ${String(result.result).slice(0, 160)}`,
+        );
+        input.onProgress?.("architecture: retrying submission");
+        const nudged = await eko.execute(taskId);
+        lastError = String(nudged.result).slice(0, 200);
+        result = nudged;
+      }
       if (input.signal.aborted || result.stopReason === "abort") {
         throw new Error("Architecture design cancelled");
       }
       if (!result.success && submittedNodes().length === 0) {
-        warnings.push(`Architecture agent stopped: ${result.result.slice(0, 200) || "unknown"}`);
+        lastError = String(result.result).slice(0, 200);
       }
     } finally {
       input.signal.removeEventListener("abort", onAbort);
@@ -552,10 +570,11 @@ export async function runArchitectureDesignAgent(
   }
 
   if (submittedNodes().length === 0) {
+    if (lastError) warnings.push(`Architecture agent last error: ${lastError}`);
     return {
       scan: input.scan,
       designed: [],
-      warnings: [...warnings, "Architecture agent did not submit a usable design."],
+      warnings,
       applied: false,
       summary: "Architecture design produced no usable design.",
     };
