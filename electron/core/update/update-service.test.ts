@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import type { UpdateState } from "../../../shared/ipc";
 import {
   devUpdateConfig,
+  isFeedVersionNewer,
   normalizeFeedUrl,
+  parseFeedYml,
   UpdateService,
   type UpdateAdapter,
   type UpdateServiceOptions,
@@ -63,9 +65,7 @@ class FakeUpdater implements UpdateAdapter {
   }
 }
 
-function create(
-  overrides: Partial<UpdateServiceOptions> = {},
-): {
+function create(overrides: Partial<UpdateServiceOptions> = {}): {
   service: UpdateService;
   updater: FakeUpdater;
   states: UpdateState[];
@@ -90,9 +90,7 @@ describe("normalizeFeedUrl", () => {
     expect(normalizeFeedUrl(" https://updates.example.com/jin/// ")).toBe(
       "https://updates.example.com/jin",
     );
-    expect(normalizeFeedUrl("http://localhost:8080/feed")).toBe(
-      "http://localhost:8080/feed",
-    );
+    expect(normalizeFeedUrl("http://localhost:8080/feed")).toBe("http://localhost:8080/feed");
   });
 
   it("rejects empty and non-http feeds", () => {
@@ -221,8 +219,73 @@ describe("UpdateService", () => {
     await service.initialize();
     expect(updater.forceDevUpdateConfig).toBe(true);
     expect(updater.updateConfigPath).toBe(configPath);
-    expect(readFileSync(configPath, "utf8")).toContain(
-      'url: "https://updates.example.com/jin"',
-    );
+    expect(readFileSync(configPath, "utf8")).toContain('url: "https://updates.example.com/jin"');
+  });
+
+  it("falls back to the feed when the native updater is inactive", async () => {
+    const feedYml = [
+      "version: 2.0.0",
+      "files:",
+      "  - url: Jin-2.0.0.AppImage",
+      "    sha512: abc",
+      "    size: 1234",
+    ].join("\n");
+    const updater = new FakeUpdater();
+    updater.checkForUpdates = () => Promise.resolve(null);
+    const service = new UpdateService({
+      currentVersion: "1.0.0",
+      packaged: true,
+      platform: "linux",
+      feedUrl: "https://updates.example.com/jin",
+      loadUpdater: () => Promise.resolve(updater),
+      fetchText: async () => feedYml,
+    });
+
+    const state = await service.check();
+    expect(state.status).toBe("available");
+    expect(state.availableVersion).toBe("2.0.0");
+    expect(state.manual).toBe(true);
+    expect(state.downloadUrl).toBe("Jin-2.0.0.AppImage");
+  });
+
+  it("reports not-available from the feed when the version is not newer", async () => {
+    const feedYml = "version: 0.1.0\nfiles:\n  - url: a\n";
+    const updater = new FakeUpdater();
+    updater.checkForUpdates = () => Promise.resolve(null);
+    const service = new UpdateService({
+      currentVersion: "0.2.0",
+      packaged: true,
+      platform: "linux",
+      feedUrl: "https://updates.example.com/jin",
+      loadUpdater: () => Promise.resolve(updater),
+      fetchText: async () => feedYml,
+    });
+
+    const state = await service.check();
+    expect(state.status).toBe("not-available");
+    expect(state.availableVersion).toBe("0.1.0");
+  });
+});
+
+describe("feed helpers", () => {
+  it("parses the electron-updater yml version, url and size", () => {
+    const text = [
+      "version: 0.1.6",
+      "files:",
+      "  - url: Jin-Linux-0.1.6.AppImage",
+      "    sha512: cCr1",
+      "    size: 147553742",
+    ].join("\n");
+    const parsed = parseFeedYml(text);
+    expect(parsed.version).toBe("0.1.6");
+    expect(parsed.downloadUrl).toBe("Jin-Linux-0.1.6.AppImage");
+    expect(parsed.totalBytes).toBe(147553742);
+  });
+
+  it("compares dotted versions", () => {
+    expect(isFeedVersionNewer("0.1.6", "0.1.0")).toBe(true);
+    expect(isFeedVersionNewer("0.1.0", "0.1.0")).toBe(false);
+    expect(isFeedVersionNewer("1.0.0", "0.9.9")).toBe(true);
+    expect(isFeedVersionNewer("v2.0.0", "1.9.9")).toBe(true);
   });
 });

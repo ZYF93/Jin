@@ -203,7 +203,13 @@ export type UpdateStatus =
   | "error"
   | "disabled";
 
-export type UpdateReason = "development" | "no-feed" | "unsupported" | "module-missing" | null;
+export type UpdateReason =
+  | "development"
+  | "no-feed"
+  | "unsupported"
+  | "module-missing"
+  | "feed-unreachable"
+  | null;
 
 /** Cross-platform auto-update state. The feed is generic, so any static host works. */
 export interface UpdateState {
@@ -221,6 +227,14 @@ export interface UpdateState {
   canDownload: boolean;
   canInstall: boolean;
   feedUrl: string | null;
+  /**
+   * When the native updater is unavailable (dev build / unsupported module)
+   * but a feed is reachable, the update is surfaced by fetching the feed
+   * directly. This holds the installer URL the user opens to update manually.
+   */
+  downloadUrl: string | null;
+  /** True when the state came from the direct-feed fallback rather than electron-updater. */
+  manual: boolean;
 }
 
 export interface FileNode {
@@ -320,6 +334,12 @@ export interface ScanStatus {
    * (non-LLM) description, so the user can retry just those units.
    */
   semanticRetryPending: boolean;
+  /**
+   * True once the initial architecture has been fully described by the model
+   * and established. While false the project is still in its first scan and
+   * chat / proposals are blocked until it completes.
+   */
+  firstScanComplete: boolean;
 }
 
 export type LspAvailability = "available" | "missing" | "unknown";
@@ -484,6 +504,8 @@ export interface ChatMessage {
   createdAt: string;
   proposalId?: string;
   details?: string;
+  /** An inline affordance rendered inside the bubble (e.g. a scan retry action). */
+  action?: "retry-scan";
 }
 
 /** One visible tool call or error row inside the streaming activity feed. */

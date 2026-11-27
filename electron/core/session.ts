@@ -51,6 +51,7 @@ import type {
   ToolsInfo,
   VersionReplay,
   WalInfo,
+  AppSettings,
 } from "../../shared/ipc";
 import { commitFileTransaction, type StagedFileEdit } from "./agent/file-transaction";
 import { reviewProposalAcceptance } from "./agent/acceptance";
@@ -124,7 +125,7 @@ import { McpManager } from "./mcp/manager";
 import { diffScanToOps, scanNodeIntents } from "./scan/import";
 import { scanProject, listSourceFiles, type ScanResult } from "./scan/scanner";
 import { readScanManifest, writeScanManifest } from "./scan/manifest";
-import { runSemanticPass } from "./scan/semantic";
+import { runArchitectureDesignAgent } from "./scan/arch-agent";
 import { gitState, runProjectChecks, verifyArchitecture } from "./verify/verify";
 import { installMergeDriver, mergeInstructions } from "./git/merge-driver";
 import type { SettingsStore } from "./settings/app-settings";
@@ -154,6 +155,13 @@ export interface SessionDeps {
   globalRules?: () => string;
   /** Shared app-level VS Code Marketplace store, when available. */
   marketplace?: LspMarketplace;
+  /**
+   * Architecture design runner. Defaults to the agent-driven designer; inject a
+   * deterministic one in tests to avoid the real LLM/Eko runtime.
+   */
+  designArchitecture?: (
+    input: import("./scan/arch-agent").ArchitectureDesignInput,
+  ) => Promise<import("./scan/arch-agent").ArchitectureDesignResult>;
 }
 
 interface InternalProposal {
@@ -270,6 +278,7 @@ function emptyScanStatus(message: string): ScanStatus {
     message,
     updatedAt: null,
     semanticRetryPending: false,
+    firstScanComplete: false,
   };
 }
 
@@ -343,7 +352,15 @@ export class ProjectSession {
    * with an LLM answer. Held so `retrySemantic` can re-run only those; null
    * when the last semantic pass was fully LLM-described.
    */
-  private pendingSemanticUnrefined: import("./scan/semantic").SemanticUnrefined | null = null;
+  /**
+   * Nodes that still lack an LLM responsibility after the last architecture
+   * design pass, held so a retry can re-design just those. Null when the
+   * architecture is fully described by the model.
+   */
+  private pendingSemanticUnrefined: {
+    files: ScanResult["files"];
+    modules: ScanResult["nodes"][number][];
+  } | null = null;
   private closed = false;
   private branch: string | null = null;
   /** Record ids this process just appended; a watcher echo must not look like a pull. */
@@ -512,10 +529,12 @@ export class ProjectSession {
           }),
         );
       }
+      const established = Object.values(this.snapshot.nodes).some((node) => node.level === "L1");
       this.scanStatus = {
         ...this.scanStatus,
         phase: "scanning",
         message: this.t("scan.refreshing"),
+        firstScanComplete: established || this.scanStatus.firstScanComplete,
       };
       void this.refreshFacts()
         .then(() => this.resumePendingImplementation())
@@ -828,7 +847,7 @@ export class ProjectSession {
     role: ChatMessage["role"],
     kind: ChatMessage["kind"],
     content: string,
-    extra: Pick<ChatMessage, "proposalId" | "details" | "images"> = {},
+    extra: Pick<ChatMessage, "proposalId" | "details" | "images" | "action"> = {},
   ): ChatMessage {
     const message: ChatMessage = {
       id: ulid(),
@@ -1081,6 +1100,7 @@ export class ProjectSession {
       message: this.scanStatusSummary(scan, lspFacts),
       updatedAt: scan.scannedAt,
       semanticRetryPending: this.scanStatus.semanticRetryPending,
+      firstScanComplete: this.scanStatus.firstScanComplete,
     };
     this.emitState();
     return scan;
@@ -1365,6 +1385,9 @@ export class ProjectSession {
   async sendMessage(text: string, images: readonly string[] = []): Promise<AppState> {
     const request = text.trim();
     if (!request) return this.getState();
+    if (!this.scanStatus.firstScanComplete) {
+      throw new Error(this.t("error.firstScanRequired"));
+    }
     if (this.proposal?.status === "in_review") {
       throw new Error(this.t("error.approveOrRejectFirst"));
     }
@@ -1596,25 +1619,30 @@ export class ProjectSession {
       if (semanticOn && isProviderConfigured(provider)) {
         this.scanStatus = {
           ...this.scanStatus,
-          message: this.t("scan.refining"),
+          phase: "scanning",
+          message: this.t("scan.designing"),
         };
         this.emitState();
-        const semantic = await runSemanticPass(scan, provider as ProviderConfig, {
-          signal: this.abortController.signal,
-          temperature: settings.agent.temperature,
-          maxTokens: Math.min(settings.agent.maxTokens, 6000),
-          rules: this.agentRules(),
-          onUsage: (usage) => this.recordUsage("semantic", provider.model, usage),
-        });
-        scan = semantic.scan;
-        if (semantic.warnings.length > 0) scan.warnings.push(...semantic.warnings);
-        // Units the LLM did not describe are kept with their structural text
-        // and surfaced to the user for a manual retry — no local stand-in.
-        this.pendingSemanticUnrefined = semantic.hasUnrefined ? semantic.unrefined : null;
-        if (semantic.summary) {
-          semanticSummary = semantic.summary;
+        // The architecture design is a single agent pass: the model is given
+        // the whole structural/LSP picture plus read tools, assembles the
+        // design, and submits it. No per-node back-and-forth.
+        const design = await this.runArchitectureDesign(
+          scan,
+          provider as ProviderConfig,
+          settings,
+          null,
+        );
+        scan = design.scan;
+        if (design.unrefined.files.length + design.unrefined.modules.length > 0) {
+          this.pendingSemanticUnrefined = design.unrefined;
+        } else {
+          this.pendingSemanticUnrefined = null;
+        }
+        if (design.summary) {
+          semanticSummary = design.summary;
           this.rag.update(this.root, scan, this.snapshot);
         }
+        const hasUnrefined = this.pendingSemanticUnrefined !== null;
         this.scanResult = scan;
         this.scanStatus = {
           ...this.scanStatus,
@@ -1625,22 +1653,23 @@ export class ProjectSession {
           edges: scan.stats.edges,
           message: this.scanStatusSummary(scan),
           updatedAt: scan.scannedAt,
-          semanticRetryPending: semantic.hasUnrefined,
+          semanticRetryPending: hasUnrefined,
         };
         this.emitState();
-        if (semantic.hasUnrefined) {
+        if (!initialImport && hasUnrefined) {
           // Tell the user which parts were not LLM-described so they can
-          // retry instead of silently accepting local templates.
+          // retry instead of silently accepting local templates. The first
+          // scan reports its own failure state below.
           this.addMessage(
             "assistant",
             "scan",
             this.t("session.semanticPartial", {
-              files: semantic.unrefined.files.length,
-              modules: semantic.unrefined.modules.length,
+              files: design.unrefined.files.length,
+              modules: design.unrefined.modules.length,
             }),
           );
         }
-      } else if (semanticOn) {
+      } else if (semanticOn && !initialImport) {
         // The user wanted semantic refinement but it was not applied (no
         // provider configured, or the toggle is off for a non-initial scan),
         // so L0 descriptions would stay mechanical. Surface that explicitly.
@@ -1653,6 +1682,103 @@ export class ProjectSession {
               : this.t("session.semanticSkippedReason.provider"),
           }),
         );
+      }
+      if (initialImport) {
+        // First scan: the architecture must be fully described by the model
+        // before the user can chat or propose. There is no reject step — a
+        // complete first scan is established directly.
+        const stats = {
+          files: scan.stats.files,
+          symbols: scan.stats.symbols,
+          nodes: scan.stats.nodes,
+          edges: scan.stats.edges,
+          message: this.scanStatusSummary(scan),
+          updatedAt: scan.scannedAt,
+        };
+        this.scanResult = scan;
+        if (!isProviderConfigured(provider)) {
+          this.scanStatus = {
+            ...this.scanStatus,
+            ...stats,
+            phase: "ready",
+            firstScanComplete: false,
+            semanticRetryPending: false,
+          };
+          this.emitState();
+          this.addMessage("assistant", "scan", this.t("session.firstScanNeedsProvider"));
+          return this.getState();
+        }
+        if (this.pendingSemanticUnrefined) {
+          this.scanStatus = {
+            ...this.scanStatus,
+            ...stats,
+            phase: "ready",
+            firstScanComplete: false,
+            semanticRetryPending: true,
+          };
+          this.emitState();
+          this.addMessage(
+            "assistant",
+            "scan",
+            this.t("session.firstScanFailed", {
+              files: this.pendingSemanticUnrefined.files.length,
+              modules: this.pendingSemanticUnrefined.modules.length,
+              reason: this.semanticFailureReason(scan.warnings),
+            }),
+            { action: "retry-scan" },
+          );
+          return this.getState();
+        }
+        // Complete: commit the initial architecture directly (no review/reject).
+        const importResult = diffScanToOps(this.snapshot, scan);
+        const intent: Intent = {
+          id: ulid(),
+          versionId: ulid(),
+          title: this.t("session.syncTitle.import"),
+          goal: this.t("session.syncGoal.import", { files: scan.stats.files }),
+          tasks: [
+            {
+              id: ulid(),
+              title: this.t("session.syncTask.import"),
+              status: "pending",
+              dependsOn: [],
+              acceptance: [
+                this.t("session.syncAcceptance.import.1"),
+                this.t("session.syncAcceptance.import.2"),
+                this.t("session.syncAcceptance.import.3"),
+              ],
+            },
+          ],
+          nodeIntents: scanNodeIntents(scan.nodes),
+          author: this.currentActor(),
+          createdAt: nowIso(),
+          mode: "architecture",
+        };
+        const proposal = this.makeProposal(intent, importResult.ops, [], null);
+        proposal.architectureOnly = true;
+        this.appendBundle(proposal, "approved", "");
+        proposal.status = "approved";
+        this.proposal = null;
+        this.pendingSemanticUnrefined = null;
+        this.rag.update(this.root, scan, this.snapshot);
+        this.scanStatus = {
+          ...this.scanStatus,
+          ...stats,
+          phase: "ready",
+          firstScanComplete: true,
+          semanticRetryPending: false,
+        };
+        this.emitState();
+        this.addMessage(
+          "assistant",
+          "scan",
+          this.t("session.firstScanComplete", {
+            files: scan.stats.files,
+            nodes: scan.stats.nodes,
+            summary: semanticSummary ? ` ${semanticSummary}` : "",
+          }),
+        );
+        return this.getState();
       }
       const importResult = diffScanToOps(this.snapshot, scan);
       if (importResult.ops.length === 0) {
@@ -1782,6 +1908,81 @@ export class ProjectSession {
   }
 
   /**
+   * A short, user-facing reason for a failed semantic pass, extracted from the
+   * batch warnings (e.g. a provider 503/429). Falls back to a generic message
+   * when no provider error is present.
+   */
+  private semanticFailureReason(warnings: readonly string[]): string {
+    const provider = warnings.find((warning) =>
+      /Provider \d{3}|circuit is open|rate limit/i.test(warning),
+    );
+    const raw = provider ?? warnings[warnings.length - 1] ?? "";
+    // Trim the "Semantic batch … failed after N attempt(s); … : " prefix.
+    const tail = raw.includes(": ") ? raw.slice(raw.lastIndexOf(": ") + 2) : raw;
+    const clipped = tail
+      .replace(/\s*\(request id:[^)]*\)\s*/i, "")
+      .trim()
+      .slice(0, 200);
+    return clipped || this.t("session.semanticFailedGeneric");
+  }
+
+  /**
+   * Run the agent-driven architecture design. The whole structural/LSP picture
+   * is handed to the model with read-only tools; it assembles the L0/L1/facet
+   * design and submits it in one structured call. `only` restricts the design
+   * to the units still undescribed (a retry). Returns the grafted scan plus
+   * which units remain undescribed.
+   */
+  private async runArchitectureDesign(
+    base: ScanResult,
+    provider: ProviderConfig,
+    settings: AppSettings,
+    only: { files: string[]; modules: string[] } | null,
+  ): Promise<{
+    scan: ScanResult;
+    unrefined: { files: ScanResult["files"]; modules: ScanResult["nodes"][number][] };
+    summary: string;
+    applied: boolean;
+  }> {
+    const onProgress = (message: string): void => {
+      this.scanStatus = { ...this.scanStatus, phase: "scanning", message };
+      this.emitState();
+    };
+    const runner = this.deps.designArchitecture ?? runArchitectureDesignAgent;
+    const result = await runner({
+      root: this.root,
+      provider,
+      scan: base,
+      lspFacts: this.lastLspFacts ?? undefined,
+      rules: this.agentRules(),
+      temperature: settings.agent.temperature,
+      maxTokens: Math.min(settings.agent.maxTokens, 16000),
+      signal: this.abortController?.signal ?? new AbortController().signal,
+      onUsage: (usage) => this.recordUsage("semantic", provider.model, usage),
+      onProgress,
+      only: only ?? undefined,
+    });
+    // `only` filters which units count as "expected"; anything in the design
+    // output that still has an empty responsibility is unrefined.
+    const inScope = only ? new Set([...only.files, ...only.modules]) : null;
+    const unrefinedFiles = result.scan.files.filter((file) => {
+      if (inScope && !inScope.has(file.path)) return false;
+      return !file.responsibility.trim();
+    });
+    const unrefinedModules = result.scan.nodes.filter((node) => {
+      if (node.level !== "L0" || node.kind === "system" || node.kind === "external") return false;
+      if (inScope && !inScope.has(node.path ?? "")) return false;
+      return !node.responsibility.trim();
+    });
+    return {
+      scan: result.scan,
+      unrefined: { files: unrefinedFiles, modules: unrefinedModules },
+      summary: result.summary,
+      applied: result.applied,
+    };
+  }
+
+  /**
    * Re-run only the units the last semantic pass left un-described (L0 modules
    * / L1 files / facets the model did not refine). A no-op when there is
    * nothing pending, so the button can be shown and disabled cheaply.
@@ -1802,32 +2003,86 @@ export class ProjectSession {
     this.scanStatus = {
       ...this.scanStatus,
       phase: "scanning",
-      message: this.t("scan.refining"),
+      message: this.t("scan.designing"),
     };
     this.emitState();
     this.abortController = new AbortController();
     try {
       // Re-scan structural facts so the pending set stays consistent with the
-      // current source, then refine only the un-described units.
-      let scan = await this.refreshFacts(this.abortController.signal);
-      const semantic = await runSemanticPass(scan, provider as ProviderConfig, {
-        signal: this.abortController.signal,
-        temperature: settings.agent.temperature,
-        maxTokens: Math.min(settings.agent.maxTokens, 6000),
-        rules: this.agentRules(),
-        onUsage: (usage) => this.recordUsage("semantic", provider.model, usage),
-        only: {
-          files: pending.files.map((file) => file.path),
-          modules: pending.modules
-            .map((node) => node.path)
-            .filter((path): path is string => Boolean(path)),
-        },
+      // current source, then design only the still-undescribed units.
+      const isFirstScan = !this.scanStatus.firstScanComplete;
+      const base = await this.refreshFacts(this.abortController.signal);
+      const design = await this.runArchitectureDesign(base, provider as ProviderConfig, settings, {
+        files: pending.files.map((file) => file.path),
+        modules: pending.modules
+          .map((node) => node.path)
+          .filter((path): path is string => Boolean(path)),
       });
-      scan = semantic.scan;
-      if (semantic.warnings.length > 0) scan.warnings.push(...semantic.warnings);
-      this.pendingSemanticUnrefined = semantic.hasUnrefined ? semantic.unrefined : null;
+      const scan = design.scan;
+      this.pendingSemanticUnrefined =
+        design.unrefined.files.length + design.unrefined.modules.length > 0
+          ? design.unrefined
+          : null;
       this.scanResult = scan;
       this.rag.update(this.root, scan, this.snapshot);
+      const hasUnrefined = this.pendingSemanticUnrefined !== null;
+
+      // If this retry finished a first scan, establish the architecture
+      // directly (no reject) instead of leaving an in-review proposal.
+      if (isFirstScan && !hasUnrefined) {
+        const importResult = diffScanToOps(this.snapshot, scan);
+        const intent: Intent = {
+          id: ulid(),
+          versionId: ulid(),
+          title: this.t("session.syncTitle.import"),
+          goal: this.t("session.syncGoal.import", { files: scan.stats.files }),
+          tasks: [
+            {
+              id: ulid(),
+              title: this.t("session.syncTask.import"),
+              status: "pending",
+              dependsOn: [],
+              acceptance: [
+                this.t("session.syncAcceptance.import.1"),
+                this.t("session.syncAcceptance.import.2"),
+                this.t("session.syncAcceptance.import.3"),
+              ],
+            },
+          ],
+          nodeIntents: scanNodeIntents(scan.nodes),
+          author: this.currentActor(),
+          createdAt: nowIso(),
+          mode: "architecture",
+        };
+        const proposal = this.makeProposal(intent, importResult.ops, [], null);
+        proposal.architectureOnly = true;
+        this.appendBundle(proposal, "approved", "");
+        proposal.status = "approved";
+        this.proposal = null;
+        this.scanStatus = {
+          ...this.scanStatus,
+          phase: "ready",
+          files: scan.stats.files,
+          symbols: scan.stats.symbols,
+          nodes: scan.stats.nodes,
+          edges: scan.stats.edges,
+          message: this.scanStatusSummary(scan),
+          updatedAt: scan.scannedAt,
+          semanticRetryPending: false,
+          firstScanComplete: true,
+        };
+        this.emitState();
+        this.addMessage(
+          "assistant",
+          "scan",
+          this.t("session.firstScanComplete", {
+            files: scan.stats.files,
+            nodes: scan.stats.nodes,
+          }),
+        );
+        return this.getState();
+      }
+
       this.scanStatus = {
         ...this.scanStatus,
         phase: "ready",
@@ -1837,23 +2092,21 @@ export class ProjectSession {
         edges: scan.stats.edges,
         message: this.scanStatusSummary(scan),
         updatedAt: scan.scannedAt,
-        semanticRetryPending: semantic.hasUnrefined,
+        semanticRetryPending: hasUnrefined,
       };
       this.emitState();
-      if (semantic.hasUnrefined) {
+      if (hasUnrefined) {
         this.addMessage(
           "assistant",
           "scan",
           this.t("session.semanticPartial", {
-            files: semantic.unrefined.files.length,
-            modules: semantic.unrefined.modules.length,
+            files: this.pendingSemanticUnrefined!.files.length,
+            modules: this.pendingSemanticUnrefined!.modules.length,
           }),
         );
       } else {
         this.addMessage("assistant", "scan", this.t("session.semanticComplete"));
       }
-      // Carry the refined responsibilities into the pending/next architecture
-      // ops so the LLM text reaches the review instead of the templates.
       const importResult = diffScanToOps(this.snapshot, scan);
       if (importResult.ops.length > 0) {
         const intent: Intent = {

@@ -213,6 +213,11 @@ const en = {
   "chat.providerRequiredShort": "no provider",
   "chat.providerRequired":
     "No AI provider is configured yet. Add one in Settings to chat, plan, or implement.",
+  "chat.firstScanFailed":
+    "The first scan is not complete and chat is locked. Automatic retries could not finish describing the architecture.",
+  "chat.firstScanRunning": "Establishing the architecture with the model…",
+  "chat.firstScanRetry": "Retry description",
+  "chat.firstScanRetrying": "Retrying…",
   "chat.configureProvider": "Configure",
   "chat.emptyDetailNoProvider":
     "Configure an AI provider to chat, plan, and implement. Jin never ships with a default provider.",
@@ -463,6 +468,9 @@ const en = {
   "settings.updateCheck": "Check now",
   "settings.updateDownload": "Download update",
   "settings.updateInstall": "Restart and install",
+  "settings.updateManual": "Open installer",
+  "settings.updateManualDetail":
+    "Automatic updates are unavailable in this build. Open the installer to update manually.",
   "settings.updateChecking": "Checking for updates…",
   "settings.updateAvailable": "Version {version} is available.",
   "settings.updateNotAvailable": "Jin is up to date.",
@@ -474,6 +482,7 @@ const en = {
   "settings.updateReason.no-feed": "no update feed is configured",
   "settings.updateReason.unsupported": "this platform or package format is not supported",
   "settings.updateReason.module-missing": "the updater module could not be loaded",
+  "settings.updateReason.feed-unreachable": "the update feed could not be reached",
   "settings.provider": "Provider",
   "settings.modelsRefresh": "Refresh remote models",
   "settings.modelsHint":
@@ -921,7 +930,7 @@ const en = {
   "scan.ready": "Ready.",
   "scan.scanning": "Scanning source facts…",
   "scan.refreshing": "Refreshing source facts…",
-  "scan.refining": "Refining architecture with the model…",
+  "scan.designing": "Designing the architecture with the model…",
   "scan.walParseErrors": "WAL has parse errors",
   "scan.summary": "{files} files, {symbols} symbols, {nodes} nodes.",
   "scan.summaryWarnings": "{files} files, {nodes} nodes. {warnings}",
@@ -964,6 +973,14 @@ const en = {
   "session.semanticPartial":
     "The model described most of the architecture, but {files} file(s) and {modules} module(s) were not described. They keep their structural text. Use “Retry description” to run the model over just those.",
   "session.semanticComplete": "The model described the full architecture.",
+  "session.firstScanNeedsProvider":
+    "First scan is waiting on an AI provider. Configure one in Settings so the model can describe the architecture; chat stays blocked until the first scan completes.",
+  "session.firstScanFailed":
+    "The first scan could not be fully described: the model failed to describe {files} file(s) and {modules} module(s) even after automatic retries. Chat and proposals stay blocked. Reason: {reason} Use “Retry description” to run the model over the remaining nodes, or switch models in Settings.",
+  "session.semanticFailedGeneric":
+    "the model did not return a usable description (it may be busy, rate-limited, or the model name may be unavailable).",
+  "session.firstScanComplete":
+    "First scan complete: the architecture for {files} files and {nodes} nodes is now established by the model. Chat and proposals are unlocked.",
   "session.semanticPartialButton": "Retry description for the remaining nodes",
   "session.semanticRetryTitle": "Retry architecture descriptions",
   "session.semanticRetryGoal":
@@ -1059,6 +1076,8 @@ const en = {
   "error.notFolder": "Not a folder: {path}",
   "error.approveOrRejectFirst":
     "Approve or reject the current proposal before starting another turn.",
+  "error.firstScanRequired":
+    "The first scan is not complete, so chat and proposals are blocked. Finish the scan first (see the message above).",
   "error.rescanBlocked": "Approve or reject the current proposal before rescanning.",
   "error.agentWorking": "The agent is already working. Wait or cancel the current run.",
   "error.noMatchingProposal": "No matching proposal is in review.",
@@ -1392,6 +1411,10 @@ const zh: Record<MessageKey, string> = {
   "chat.reviewPrompt": "开始下一轮之前，请先批准或拒绝 {ordinal}。",
   "chat.providerRequiredShort": "未配置 Provider",
   "chat.providerRequired": "尚未配置 AI Provider。请在设置中添加一个，以便聊天、规划或实现。",
+  "chat.firstScanFailed": "首次扫描尚未完成，聊天已锁定。自动重试未能完成架构描述。",
+  "chat.firstScanRunning": "正在用模型建立架构…",
+  "chat.firstScanRetry": "重试描述",
+  "chat.firstScanRetrying": "重试中…",
   "chat.configureProvider": "去配置",
   "chat.emptyDetailNoProvider":
     "配置 AI Provider 后即可聊天、规划与实现。Jin 不会附带任何默认 Provider。",
@@ -1620,6 +1643,8 @@ const zh: Record<MessageKey, string> = {
   "settings.updateCheck": "立即检查",
   "settings.updateDownload": "下载更新",
   "settings.updateInstall": "重启并安装",
+  "settings.updateManual": "打开安装包",
+  "settings.updateManualDetail": "此构建无法自动更新。请打开安装包手动更新。",
   "settings.updateChecking": "正在检查更新…",
   "settings.updateAvailable": "发现新版本 {version}。",
   "settings.updateNotAvailable": "Jin 已是最新版本。",
@@ -1631,6 +1656,7 @@ const zh: Record<MessageKey, string> = {
   "settings.updateReason.no-feed": "未配置更新 feed",
   "settings.updateReason.unsupported": "当前平台或包格式不受支持",
   "settings.updateReason.module-missing": "无法加载更新模块",
+  "settings.updateReason.feed-unreachable": "无法连接更新 feed",
   "settings.provider": "Provider",
   "settings.modelsRefresh": "刷新远端模型",
   "settings.modelsHint": "模型会从 Provider 的兼容模型端点自动拉取；也可以手动输入模型 ID。",
@@ -2058,7 +2084,7 @@ const zh: Record<MessageKey, string> = {
   "scan.ready": "就绪。",
   "scan.scanning": "正在扫描源码事实…",
   "scan.refreshing": "正在刷新源码事实…",
-  "scan.refining": "正在用模型细化架构…",
+  "scan.designing": "正在用模型设计架构…",
   "scan.walParseErrors": "WAL 存在解析错误",
   "scan.summary": "{files} 个文件，{symbols} 个符号，{nodes} 个节点。",
   "scan.summaryWarnings": "{files} 个文件，{nodes} 个节点。{warnings}",
@@ -2096,6 +2122,13 @@ const zh: Record<MessageKey, string> = {
   "session.semanticPartial":
     "模型已描述大部分架构，但有 {files} 个文件和 {modules} 个模块未被描述，它们保留结构文本。可点击“重试描述”仅对这些部分重跑模型。",
   "session.semanticComplete": "模型已描述完整架构。",
+  "session.firstScanNeedsProvider":
+    "首次扫描正在等待 AI Provider。请在设置中配置一个，让模型描述架构；首次扫描完成前聊天保持锁定。",
+  "session.firstScanFailed":
+    "首次扫描无法完成描述：自动重试后，模型仍未能描述 {files} 个文件和 {modules} 个模块。聊天与提案保持锁定。原因：{reason} 可点“重试描述”对剩余节点再跑一次模型，或在设置中切换模型。",
+  "session.semanticFailedGeneric": "模型未返回可用的描述（可能繁忙、被限流，或模型名不可用）。",
+  "session.firstScanComplete":
+    "首次扫描完成：已为 {files} 个文件、{nodes} 个节点建立模型生成的架构。聊天与提案已解锁。",
   "session.semanticPartialButton": "对剩余节点重试描述",
   "session.semanticRetryTitle": "重试架构描述",
   "session.semanticRetryGoal": "为 {files} 个节点用模型生成的角色替换结构描述。",
@@ -2180,6 +2213,7 @@ const zh: Record<MessageKey, string> = {
   "error.folderMissing": "文件夹不存在：{path}",
   "error.notFolder": "不是文件夹：{path}",
   "error.approveOrRejectFirst": "开始下一轮前，请先批准或拒绝当前提案。",
+  "error.firstScanRequired": "首次扫描尚未完成，聊天与提案被锁定。请先完成扫描（见上方提示）。",
   "error.rescanBlocked": "重新扫描前，请先批准或拒绝当前提案。",
   "error.agentWorking": "Agent 正在工作。请等待或取消当前运行。",
   "error.noMatchingProposal": "没有匹配的审阅中提案。",

@@ -21,6 +21,7 @@ const MAX_ARCHITECTURE_NODES = 320;
 const MAX_ARCHITECTURE_EDGES = 480;
 const MAX_EKO_STEPS = 32;
 const configuredEkoModules = new WeakSet<object>();
+export { configuredEkoModules };
 
 export interface StagedEdit {
   path: string;

@@ -125,9 +125,11 @@ function updateStatusText(
     case "checking":
       return t("settings.updateChecking");
     case "available":
-      return t("settings.updateAvailable", {
-        version: update.availableVersion ?? "?",
-      });
+      return update.manual
+        ? t("settings.updateManualDetail")
+        : t("settings.updateAvailable", {
+            version: update.availableVersion ?? "?",
+          });
     case "not-available":
       return t("settings.updateNotAvailable");
     case "downloading":
@@ -507,7 +509,7 @@ function GeneralTab({
                   onClick={() => void installUpdate()}
                 >
                   <Download size={10} />
-                  {t("settings.updateInstall")}
+                  {update.manual ? t("settings.updateManual") : t("settings.updateInstall")}
                 </button>
               ) : null}
             </div>

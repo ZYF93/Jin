@@ -190,6 +190,7 @@ function emptyState(): AppState {
       message: t("scan.idle"),
       updatedAt: null,
       semanticRetryPending: false,
+      firstScanComplete: false,
     },
     lsp: [],
     tools: emptyTools(),
@@ -765,6 +766,12 @@ function registerIpcHandlers(): void {
     requireUpdateService().download(),
   );
   ipcMain.handle(IPC_CHANNELS.installUpdate, (): void => {
+    const state = requireUpdateService().getState();
+    // Manual feed fallback: hand the installer URL off to the OS.
+    if (state.downloadUrl && state.status === "available") {
+      void shell.openExternal(state.downloadUrl);
+      return;
+    }
     if (!requireUpdateService().install()) {
       throw new Error(t("settings.updateError", { message: "No downloaded update" }));
     }

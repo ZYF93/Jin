@@ -113,7 +113,7 @@ export interface ScanOptions {
   >;
 }
 
-const SCANNER_PARSER_VERSION = 2;
+const SCANNER_PARSER_VERSION = 3;
 
 function isSourceFile(path: string): boolean {
   return SOURCE_EXTENSIONS.has(extname(path).toLowerCase());
@@ -346,17 +346,6 @@ function topLevelMembers(text: string): ScanMember[] {
     if (match[1]) add(match[1], "field");
   }
   return members;
-}
-
-function firstDocComment(text: string): string {
-  const match = text.match(/\/\*\*([\s\S]*?)\*\//);
-  if (!match?.[1]) return "";
-  return match[1]
-    .split("\n")
-    .map((line) => line.replace(/^\s*\*\s?/, "").trim())
-    .filter(Boolean)
-    .join(" ")
-    .slice(0, 260);
 }
 
 function classifyKind(path: string, exports: readonly string[], source: string): L1Kind {
@@ -643,7 +632,7 @@ function moduleNodesForDirectory(
     path: dir,
     file: "",
     symbol: "",
-    responsibility: `Contains ${name} source units.`,
+    responsibility: "",
     intentId: null,
     status: "active",
     metadata: { origin: "scan", directory: dir, depth: segments.length },
@@ -720,12 +709,10 @@ export function scanProject(
       title = basename(path).startsWith("index.")
         ? basename(dirname(path)) || basename(path)
         : basename(path).replace(/\.[^.]+$/, "");
-      const doc = firstDocComment(text);
-      responsibility =
-        doc ||
-        (exports.length > 0
-          ? `Provides ${exports.slice(0, 4).join(", ")}${exports.length > 4 ? "…" : ""}.`
-          : `${kind} source unit.`);
+      // Descriptions come only from the LLM semantic pass; the structural
+      // scanner records facts (kind, exports, members) and leaves the
+      // responsibility empty until the model describes the unit.
+      responsibility = "";
     }
     manifest[path] = {
       parserVersion: SCANNER_PARSER_VERSION,
@@ -892,7 +879,7 @@ export function scanProject(
         path: file.path,
         file: file.path,
         symbol: `#${member.name}`,
-        responsibility: `${member.kind} ${member.name} on ${file.title}.`,
+        responsibility: "",
         intentId: null,
         status: "active",
         metadata: {

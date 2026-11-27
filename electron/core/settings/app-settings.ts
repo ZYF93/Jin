@@ -332,14 +332,18 @@ export class SettingsStore {
 
   get(): AppSettings {
     const raw = this.readRaw();
+    // A stored key only counts if it can actually be decrypted; otherwise the
+    // provider is effectively unconfigured and requests would silently 401.
+    const apiKeyUsable = Boolean(this.getProviderApiKey());
+    const searchKeyUsable = Boolean(this.getSearchApiKey());
     return {
       language: raw.language,
       theme: raw.theme,
       glass: raw.glass,
       provider: {
         ...raw.provider,
-        hasApiKey: Boolean(getSetting(this.app, API_KEY)),
-        hasSearchApiKey: Boolean(getSetting(this.app, SEARCH_API_KEY)),
+        hasApiKey: apiKeyUsable,
+        hasSearchApiKey: searchKeyUsable,
       },
       providerProfiles: raw.providerProfiles,
       agent: raw.agent,

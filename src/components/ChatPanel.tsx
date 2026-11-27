@@ -10,6 +10,7 @@ import {
   Clock,
   Copy,
   Check,
+  RefreshCw,
   GitPullRequest,
   MessageSquare,
   ScanSearch,
@@ -68,6 +69,11 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const busy = useJin((state) => state.busy);
   const deleteMessage = useJin((state) => state.deleteMessage);
   const setComposerSeed = useJin((state) => state.setComposerSeed);
+  const retrySemantic = useJin((state) => state.retrySemantic);
+  const scanPhase = useJin((state) => state.app?.scan.phase);
+  // A scan-retry is blocked while a scan/retry is in flight so the button
+  // cannot be spammed; it re-enables once the run settles.
+  const retryBusy = busy !== null || scanPhase === "scanning";
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const current =
@@ -139,6 +145,16 @@ function ChatBubble({ message }: { message: ChatMessage }) {
               <summary>{t("chat.details")}</summary>
               <pre>{message.details}</pre>
             </details>
+          ) : null}
+          {message.action === "retry-scan" ? (
+            <button
+              className="btn btn-primary mt-2 h-7 w-full text-[9px]"
+              disabled={retryBusy}
+              onClick={() => void retrySemantic()}
+            >
+              {retryBusy ? <Spinner size={10} /> : <RefreshCw size={10} />}
+              {retryBusy ? t("chat.firstScanRetrying") : t("chat.firstScanRetry")}
+            </button>
           ) : null}
         </div>
         <div
@@ -335,6 +351,35 @@ function AgentActivity({ suppressError = false }: { suppressError?: boolean }) {
   );
 }
 
+/**
+ * Live, in-chat view of a first-scan that is still describing the architecture
+ * with the model. It renders only while a project's first scan has not
+ * completed and the scan is actively running, so the user sees real progress
+ * ("scanning…", "refining…", "retry round N…") instead of a frozen app.
+ */
+function ScanActivity() {
+  const t = useT();
+  const scan = useJin((state) => state.app?.scan);
+  const project = useJin((state) => state.app?.project);
+  if (!project || !scan || scan.phase !== "scanning" || scan.firstScanComplete) return null;
+  return (
+    <div className="fade-in flex gap-2 px-1">
+      <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--panel-soft)]">
+        <Spinner size={11} className="text-[var(--accent)]" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--panel-soft)] px-2.5 py-2">
+          <ScanSearch size={12} className="shrink-0 text-[var(--accent)]" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-semibold">{t("chat.firstScanRunning")}</div>
+            <div className="mt-0.5 truncate text-[9px] text-[var(--muted)]">{scan.message}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ChatPanel() {
   const t = useT();
   const app = useJin((state) => state.app);
@@ -361,6 +406,7 @@ export function ChatPanel() {
   const working =
     agent?.phase === "planning" || agent?.phase === "implementing" || agent?.phase === "verifying";
   const configured = isProviderConfigured(app?.settings.provider);
+  const firstScanPending = Boolean(app?.project) && !app?.scan.firstScanComplete;
   const latestMessage = messages[messages.length - 1];
   const errorAlreadyShown =
     agent?.phase === "error" &&
@@ -368,8 +414,9 @@ export function ChatPanel() {
     latestMessage.content.includes(agent.message);
   // The composer stays usable while the agent works: extra turns queue and
   // flush when it settles (or right after Stop). Only project/review/provider
-  // problems close the input.
-  const disabled = !app?.project || reviewing || !configured;
+  // problems close the input. Until the first scan fully establishes the
+  // architecture, chat is closed and the user must continue the scan.
+  const disabled = !app?.project || reviewing || !configured || firstScanPending;
   const queue = useJin((state) => state.queue);
   const clearQueue = useJin((state) => state.clearQueue);
   const removeQueued = useJin((state) => state.removeQueued);
@@ -461,6 +508,7 @@ export function ChatPanel() {
           messages.map((message) => <ChatBubble key={message.id} message={message} />)
         )}
         <AgentActivity suppressError={errorAlreadyShown} />
+        <ScanActivity />
       </div>
 
       <div className="shrink-0 border-t border-[var(--border)] p-2.5">
