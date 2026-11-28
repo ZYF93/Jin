@@ -19,11 +19,28 @@ import { stableIds } from "../ids/stable";
  * the *design* — grouping, kinds, responsibilities and domains.
  */
 
-const MAX_EKO_STEPS = 60;
+// The Eko tool loop re-sends the whole context every step, so the real lever
+// is keeping each tool result small (see compactText) rather than cutting the
+// run short. Steps/token limits are generous safety nets, not the primary cap.
+const MAX_EKO_STEPS = 24;
 const MAX_DESIGN_NODES = 400;
 const MAX_RESPONSIBILITY = 280;
 const MAX_DOMAIN = 48;
 const MAX_SYMBOLS_PER_FILE = 24;
+/** Max files listed in the initial design context (keeps the prompt bounded). */
+const MAX_CONTEXT_FILES = 200;
+/** Default/max lines a single read_file returns. */
+const READ_LINES = 200;
+/** Max characters a single tool result contributes to the transcript. */
+const MAX_READ_CHARS = 6000;
+/** Total source lines the agent may read across the whole design. */
+const MAX_TOTAL_READ_LINES = 4000;
+/**
+ * Last-resort ceiling on tokens the design may consume before we abort and
+ * keep whatever was submitted. Set high so normal completions never hit it;
+ * it only stops a truly runaway loop.
+ */
+const MAX_DESIGN_TOKENS = 1_200_000;
 
 export interface ArchitectureDesignInput {
   root: string;
@@ -81,6 +98,22 @@ function cleanText(value: unknown, max: number): string {
   return value.replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+/**
+ * Compact a tool result before it enters the transcript. The Eko loop re-sends
+ * the whole history every step, so trimming noise (blank lines, runs of
+ * whitespace, over-long lines) keeps each step cheap without losing meaning.
+ */
+function compactText(text: string, maxChars: number): string {
+  const trimmed = text
+    .split("\n")
+    .map((line) => line.replace(/\s+$/, ""))
+    .filter((line, index, arr) => !(line === "" && arr[index - 1] === ""))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return trimmed.length > maxChars ? `${trimmed.slice(0, maxChars)}\n… [truncated]` : trimmed;
+}
+
 /** Normalize a project-relative path; reject absolute/escaping paths. */
 function relPath(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -113,6 +146,7 @@ function buildContext(
     symbolCountByPath.set(symbol.path, (symbolCountByPath.get(symbol.path) ?? 0) + 1);
   }
   const fileLines = files
+    .slice(0, MAX_CONTEXT_FILES)
     .map((file) => {
       const lsp = symbolCountByPath.get(file.path) ?? 0;
       const parts = [
@@ -132,7 +166,9 @@ function buildContext(
   return [
     `LAYOUT (directories -> files, first 30 each):\n${layout}`,
     ``,
-    `FILES (path | exports | imports | LSP symbol count), ${files.length} files:`,
+    `FILES (path | exports | imports | LSP symbol count), ${files.length} files${
+      files.length > MAX_CONTEXT_FILES ? ` (showing first ${MAX_CONTEXT_FILES})` : ""
+    }:`,
     fileLines,
   ].join("\n");
 }
@@ -165,6 +201,10 @@ export async function runArchitectureDesignAgent(
     nodes: ArchNodeDraft[];
   } | null = null;
   const submittedNodes = (): ArchNodeDraft[] => (submitted ? submitted.nodes : []);
+  /** Source lines read so far, capped to keep the tool loop cheap. */
+  let totalReadLines = 0;
+  /** Cumulative tokens spent by the design; aborts the loop past the budget. */
+  let spentTokens = 0;
 
   const toolResult = (
     text: string,
@@ -190,7 +230,7 @@ export async function runArchitectureDesignAgent(
         type: "object",
         properties: {
           path: { type: "string", description: "Project-relative file path." },
-          maxLines: { type: "number", description: "Maximum lines to return (default 400)." },
+          maxLines: { type: "number", description: "Maximum lines to return (default 200)." },
         },
         required: ["path"],
       },
@@ -201,10 +241,18 @@ export async function runArchitectureDesignAgent(
         try {
           const abs = join(input.root, path);
           const text = readFileSync(abs, "utf8");
-          const limit = typeof args.maxLines === "number" ? args.maxLines : 400;
+          const requested = typeof args.maxLines === "number" ? args.maxLines : READ_LINES;
+          const remaining = MAX_TOTAL_READ_LINES - totalReadLines;
+          if (remaining <= 0) {
+            return toolResult(
+              "Read budget exhausted; design from what you have and call submit_architecture now.",
+            );
+          }
+          const limit = Math.max(1, Math.min(requested, READ_LINES, remaining));
+          totalReadLines += limit;
           const lines = text.split("\n");
-          const body = lines.slice(0, Math.max(1, limit)).join("\n");
-          return toolResult(`${body}\n${lines.length > limit ? "… [truncated]" : ""}`);
+          const body = compactText(lines.slice(0, limit).join("\n"), MAX_READ_CHARS);
+          return toolResult(`${body}${lines.length > limit ? "\n… [truncated]" : ""}`);
         } catch (error) {
           return toolResult(
             `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -235,12 +283,20 @@ export async function runArchitectureDesignAgent(
           const result = grepFiles(input.root, pattern, {
             path: typeof args.path === "string" ? args.path : undefined,
             glob: typeof args.glob === "string" ? args.glob : undefined,
-            limit: typeof args.limit === "number" ? args.limit : undefined,
+            limit: Math.min(typeof args.limit === "number" ? args.limit : 40, 60),
           });
           if (result.hits.length === 0)
             return toolResult(`No matches in ${result.filesScanned} files.`);
-          const body = result.hits.map((hit) => `${hit.path}:${hit.line}: ${hit.text}`).join("\n");
-          return toolResult(`${body}${result.truncated ? "\n… [results truncated]" : ""}`);
+          const body = result.hits
+            .slice(0, 40)
+            .map((hit) => `${hit.path}:${hit.line}: ${hit.text.trim().slice(0, 200)}`)
+            .join("\n");
+          return toolResult(
+            compactText(
+              `${body}${result.truncated ? "\n… [results truncated]" : ""}`,
+              MAX_READ_CHARS,
+            ),
+          );
         } catch (error) {
           return toolResult(
             `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -270,7 +326,10 @@ export async function runArchitectureDesignAgent(
           typeof args.limit === "number" ? args.limit : 200,
         );
         if (result.paths.length === 0) return toolResult("No files matched.");
-        return toolResult(`${result.paths.join("\n")}${result.truncated ? "\n… [truncated]" : ""}`);
+        const body = result.paths.slice(0, 200).join("\n");
+        return toolResult(
+          compactText(`${body}${result.truncated ? "\n… [truncated]" : ""}`, MAX_READ_CHARS),
+        );
       },
     },
     {
@@ -473,8 +532,10 @@ export async function runArchitectureDesignAgent(
     .join("\n");
   const task = [
     "Design the architecture for this project and submit it.",
-    "Read only as much as you need to understand each unit's role; do not read every file. Then call submit_architecture ONCE — even a partial design is better than none.",
-    "You must finish by calling submit_architecture. If you have read enough, submit now.",
+    "You already have every file's exports, imports and members in the context below — design most nodes from that alone. Only read_file/grep a file when its role is genuinely unclear; do not read files you can already classify.",
+    "Work efficiently to save tokens: if you do read, read several files in parallel in one step and skim (small maxLines); never re-read a file.",
+    "Cover as many files as you can in the single submit_architecture call — a partial design is fine, but aim to describe every file you have enough context for. Do not explore endlessly.",
+    "You must finish by calling submit_architecture.",
     context,
   ].join("\n");
 
@@ -522,16 +583,25 @@ export async function runArchitectureDesignAgent(
         if (message.type === "tool_use" && typeof message.toolName === "string") {
           input.onProgress?.(`architect: ${message.toolName}`);
         } else if (message.type === "finish" && "usage" in message && message.usage) {
-          input.onUsage?.({
-            promptTokens: Number(message.usage.promptTokens ?? 0),
-            completionTokens: Number(message.usage.completionTokens ?? 0),
-          });
+          const promptTokens = Number(message.usage.promptTokens ?? 0);
+          const completionTokens = Number(message.usage.completionTokens ?? 0);
+          spentTokens += promptTokens + completionTokens;
+          input.onUsage?.({ promptTokens, completionTokens });
+          // Abort a runaway loop before it burns the whole budget without
+          // submitting; whatever was submitted is still applied.
+          if (spentTokens > MAX_DESIGN_TOKENS && submittedNodes().length === 0) {
+            warnings.push(
+              `Architecture design aborted at ${spentTokens} tokens (budget ${MAX_DESIGN_TOKENS}) without a submission.`,
+            );
+            eko.abortTask(taskId, "Architecture design token budget exceeded");
+          }
         }
       },
     },
   });
 
   let lastError = "";
+  let budgetAborted = false;
   try {
     await eko.initContext(workflow, { datetime: new Date().toISOString() });
     const onAbort = (): void => {
@@ -542,8 +612,14 @@ export async function runArchitectureDesignAgent(
       let result = await eko.execute(taskId);
       // If the agent ended without submitting, give it one nudge to submit a
       // partial design before we give up. A truncated/failed run otherwise
-      // leaves every node undescribed.
-      if (submittedNodes().length === 0 && !input.signal.aborted && result.stopReason !== "abort") {
+      // leaves every node undescribed. Skip the nudge once the token budget is
+      // spent, so a runaway loop cannot keep spending.
+      if (
+        submittedNodes().length === 0 &&
+        !input.signal.aborted &&
+        result.stopReason !== "abort" &&
+        spentTokens <= MAX_DESIGN_TOKENS
+      ) {
         warnings.push(
           `Architecture agent did not submit; nudging. Stop reason: ${result.stopReason || "unknown"}. ${String(result.result).slice(0, 160)}`,
         );
@@ -552,10 +628,12 @@ export async function runArchitectureDesignAgent(
         lastError = String(nudged.result).slice(0, 200);
         result = nudged;
       }
-      if (input.signal.aborted || result.stopReason === "abort") {
+      if (input.signal.aborted) {
         throw new Error("Architecture design cancelled");
       }
-      if (!result.success && submittedNodes().length === 0) {
+      // A token-budget abort is not a user cancel: keep whatever was submitted.
+      budgetAborted = result.stopReason === "abort" && spentTokens > MAX_DESIGN_TOKENS;
+      if (!result.success && submittedNodes().length === 0 && !budgetAborted) {
         lastError = String(result.result).slice(0, 200);
       }
     } finally {
